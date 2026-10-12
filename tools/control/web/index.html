@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PhoneCtrl 控制台</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:16px; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  h2 { font-size:15px; margin:0 0 8px; display:flex; justify-content:space-between; align-items:center; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(320px,1fr)); gap:16px; }
+  .card { background:#1a1d24; border:1px solid #2a2f3a; border-radius:10px; padding:12px; }
+  img { width:100%; border-radius:8px; background:#000; aspect-ratio:9/19; object-fit:contain; }
+  .row { display:flex; justify-content:space-between; padding:2px 0; border-bottom:1px dashed #2a2f3a; }
+  .tag { padding:1px 8px; border-radius:999px; font-size:12px; }
+  .ok { background:#16361f; color:#7ee2a0; } .bad { background:#3a1620; color:#ff9aa9; }
+  .run { background:#2a2440; color:#b9a4ff; }
+  .bar { height:8px; background:#2a2f3a; border-radius:5px; overflow:hidden; margin-top:6px; }
+  .bar > i { display:block; height:100%; background:#4f8cff; }
+  textarea { width:100%; height:160px; background:#0f1115; color:#cfe; border:1px solid #2a2f3a; border-radius:8px; padding:8px; font:12px/1.4 monospace; box-sizing:border-box; }
+  button { background:#4f8cff; color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-size:13px; }
+  button.sec { background:#2a2f3a; }
+  button.danger { background:#a8394a; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .log { max-height:160px; overflow:auto; font:12px/1.4 monospace; color:#9fb3c8; }
+  input, select { background:#0f1115; color:#cfe; border:1px solid #2a2f3a; border-radius:6px; padding:6px; }
+  select { padding:6px 8px; }
+  .swipe { margin-top:10px; padding-top:10px; border-top:1px solid #2a2f3a; }
+  .swipe .line { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .swipe label { color:#9fb3c8; font-size:12px; }
+  .mono { font:12px/1.4 monospace; color:#9fb3c8; }
+  .pill { display:inline-block; margin:2px; padding:4px 10px; border-radius:999px; border:1px solid #2a2f3a; cursor:pointer; font-size:12px; }
+  .pill.on { background:#4f8cff; color:#fff; border-color:#4f8cff; }
+  #msg { color:#ffd479; font-size:12px; }
+</style>
+</head>
+<body>
+<h1>PhoneCtrl · PC 端投屏与手机自动化控制台</h1>
+<div class="grid" id="cards"></div>
+
+<div class="card" style="margin-top:16px;">
+  <h2>滑屏档位配置 <span class="mono">（区间可自定义，保存到本地）</span></h2>
+  <div id="swipecfg"></div>
+  <div style="margin-top:8px; display:flex; gap:8px;">
+    <button onclick="savePresets()">保存档位配置</button>
+    <button class="sec" onclick="loadPresets(true)">恢复默认</button>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <h2>上线自动滑屏 <span class="mono">（设备一连上自动滑，断开自动停）</span></h2>
+  <div class="line">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+      <input type="checkbox" id="auto_on" onchange="autoEnabledChanged()" /> 启用自动滑屏
+    </label>
+  </div>
+  <div class="line">方向：
+    <span class="pill" id="auto_up" onclick="selAutoDir('up')">上 ↑</span>
+    <span class="pill" id="auto_down" onclick="selAutoDir('down')">下 ↓</span>
+    <span class="pill" id="auto_left" onclick="selAutoDir('left')">左 ←</span>
+    <span class="pill" id="auto_right" onclick="selAutoDir('right')">右 →</span>
+  </div>
+  <div class="line">
+    <label>间隔档位</label>
+    <select id="auto_range" onchange="autoRangeChanged()"></select>
+    <span id="auto_custom"></span>
+  </div>
+  <div style="margin-top:8px; display:flex; gap:8px;">
+    <button onclick="saveAuto()">保存并应用</button>
+    <span id="automsg"></span>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <h2>提交任务剧本 (JSON)</h2>
+  <div style="margin-bottom:8px;">
+    <input id="serial" placeholder="serial(留空=首台设备)" />
+    <button class="sec" onclick="loadSample()">载入示例</button>
+  </div>
+  <textarea id="script" placeholder='{"appName":"...","package":"com.x","loop":{"rounds":10,...}}'></textarea>
+  <div style="margin-top:8px; display:flex; gap:8px;">
+    <button onclick="startTask()">启动任务</button>
+    <button class="sec" onclick="stopAll()">停止全部</button>
+    <span id="msg"></span>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <h2>事件日志</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+const api = (p, opt) => fetch(p, opt).then(r => r.json());
+const dirLabel = { up:'上 ↑', down:'下 ↓', left:'左 ←', right:'右 →' };
+const ui = {};                 // serial -> {dir, rangeKey, min, max, tapMode}
+const cd = {};                 // serial -> nextSwipeAt(ms) for live countdown
+let presets = [];              // swipe interval presets
+
+function ensureUi(s){ if(!ui[s]) ui[s] = { dir:'up', rangeKey:(presets[0]||{key:'fast'}).key, min:1, max:3, tapMode:false }; return ui[s]; }
+function flash(t){ document.getElementById('msg').textContent = t; }
+
+// ---- presets ----
+async function loadPresets(force){
+  try {
+    const r = await api('/api/swipe/config');
+    if (Array.isArray(r)) presets = r;
+    if (force) renderPresets();
+  } catch(e){}
+  renderPresets();
+}
+function renderPresets(){
+  const el = document.getElementById('swipecfg');
+  el.innerHTML = presets.map((p,i) => `
+    <div class="line">
+      <input style="width:90px" value="${p.label}" data-i="${i}" data-f="label" />
+      <label>最小(秒)</label><input type="number" min="0.1" step="0.1" style="width:80px" value="${(p.minMs/1000).toFixed(1)}" data-i="${i}" data-f="minMs" />
+      <label>最大(秒)</label><input type="number" min="0.1" step="0.1" style="width:80px" value="${(p.maxMs/1000).toFixed(1)}" data-i="${i}" data-f="maxMs" />
+    </div>`).join('');
+  el.querySelectorAll('input').forEach(inp=>{
+    inp.oninput = () => {
+      const i = +inp.dataset.i, f = inp.dataset.f;
+      if (f==='label') presets[i].label = inp.value;
+      else presets[i][f] = Math.round(parseFloat(inp.value||'0')*1000);
+    };
+  });
+}
+async function savePresets(){
+  const r = await api('/api/swipe/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(presets) });
+  flash(r.ok ? '档位已保存' : ('保存失败: '+(r.error||'')));
+  renderAuto();
+}
+
+// ---- auto-swipe on connect ----
+let autoCfg = { enabled:false, direction:'up', rangeKey:'fast', custom:false, minMs:1000, maxMs:3000 };
+async function loadAuto(){
+  try { const r = await api('/api/autoswipe'); if (r && r.direction) autoCfg = r; } catch(e){}
+  renderAuto();
+}
+function renderAuto(){
+  const cb = document.getElementById('auto_on'); if (cb) cb.checked = !!autoCfg.enabled;
+  ['up','down','left','right'].forEach(d=>{
+    const el = document.getElementById('auto_'+d); if (el) el.classList.toggle('on', autoCfg.direction===d);
+  });
+  const sel = document.getElementById('auto_range');
+  if (sel) sel.innerHTML = presets.map(p=>`<option value="${p.key}" ${autoCfg.rangeKey===p.key?'selected':''}>${p.label}</option>`).join('')
+    + `<option value="custom" ${autoCfg.custom?'selected':''}>自定义</option>`;
+  const custom = document.getElementById('auto_custom');
+  if (custom) custom.innerHTML = autoCfg.custom
+    ? `<label>最小</label><input type="number" min="0.1" step="0.1" style="width:70px" value="${(autoCfg.minMs/1000).toFixed(1)}" oninput="autoCfg.minMs=Math.round(parseFloat(this.value||'1')*1000)"/>
+       <label>最大(秒)</label><input type="number" min="0.1" step="0.1" style="width:70px" value="${(autoCfg.maxMs/1000).toFixed(1)}" oninput="autoCfg.maxMs=Math.round(parseFloat(this.value||'3')*1000)"/>`
+    : '';
+}
+function autoEnabledChanged(){ autoCfg.enabled = document.getElementById('auto_on').checked; }
+function autoRangeChanged(){ autoCfg.rangeKey = document.getElementById('auto_range').value; autoCfg.custom = autoCfg.rangeKey==='custom'; renderAuto(); }
+function selAutoDir(d){ autoCfg.direction = d; renderAuto(); }
+async function saveAuto(){
+  const r = await api('/api/autoswipe', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(autoCfg) });
+  const m = document.getElementById('automsg');
+  m.textContent = r.ok ? '已保存并应用' : ('失败: '+(r.error||''));
+  if (r.config) autoCfg = r.config;
+  renderAuto();
+}
+
+// ---- device cards: built once, then only dynamic fields are updated ----
+function isEditing(){ const a=document.activeElement; return a && a.closest && (a.closest('#cards')||a.closest('#swipecfg')); }
+
+function buildCard(d){
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.id = 'card-' + d.serial;
+  const rangeOpts = presets.map(p => `<option value="${p.key}">${p.label}</option>`).join('')
+    + `<option value="custom">自定义</option>`;
+  el.innerHTML = `
+    <h2>${d.serial} <span id="badge-${d.serial}"></span></h2>
+    <img id="img-${d.serial}" src="/stream/${d.serial}" onerror="this.style.display='none'" alt="无投屏" />
+    <div class="row"><span>型号</span><b id="model-${d.serial}"></b></div>
+    <div class="row"><span>电量</span><b id="bat-${d.serial}"></b></div>
+    <div class="row"><span>阶段</span><b id="phase-${d.serial}"></b></div>
+    <div class="row"><span>轮次</span><b id="round-${d.serial}"></b></div>
+    <div class="row"><span>成功 / 失败</span><b><span class="tag ok" id="ok-${d.serial}"></span> <span class="tag bad" id="fail-${d.serial}"></span></b></div>
+    <div class="row"><span>当前页</span><b style="font-size:11px" id="act-${d.serial}"></b></div>
+    <div class="bar"><i id="bar-${d.serial}"></i></div>
+    <div class="swipe">
+      <div id="swipestate-${d.serial}" style="margin-bottom:4px"></div>
+      <div class="line">方向：${['up','down','left','right'].map(dir => `<span class="pill" id="dir-${d.serial}-${dir}" onclick="selDir('${d.serial}','${dir}')">${dirLabel[dir]}</span>`).join('')}</div>
+      <div class="line">
+        <label>间隔档位</label>
+        <select id="range-${d.serial}" onchange="ui['${d.serial}'].rangeKey=this.value; refresh()">${rangeOpts}</select>
+        <span id="custom-${d.serial}"></span>
+      </div>
+      <div class="line">
+        <button id="start-${d.serial}" onclick="startSwipe('${d.serial}')">▶ 开始滑屏</button>
+        <button class="danger" id="stop-${d.serial}" onclick="stopSwipe('${d.serial}')">■ 停止</button>
+      </div>
+    </div>
+    <div class="line" style="margin-top:8px">
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="tap-${d.serial}" onchange="ui['${d.serial}'].tapMode=this.checked; document.getElementById('img-${d.serial}').style.cursor=this.checked?'crosshair':'default'"/> 点击操控</label>
+      <button class="sec" onclick="openMirror('${d.serial}')">桌面投屏</button>
+      <button class="sec" onclick="sendKey('${d.serial}','3')">HOME</button>
+      <button class="sec" onclick="sendKey('${d.serial}','4')">返回</button>
+    </div>
+  `;
+  document.getElementById('cards').appendChild(el);
+  el.querySelector('#img-' + d.serial).addEventListener('click', (e) => onMirrorClick(d.serial, e));
+}
+
+function updateCard(d){
+  const u = ensureUi(d.serial);
+  const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+  set('badge-' + d.serial, d.online ? '<span class="tag ok">在线</span>' : '<span class="tag bad">离线</span>');
+  set('model-' + d.serial, d.model);
+  set('bat-' + d.serial, (d.batteryPct ?? '-') + '%');
+  set('phase-' + d.serial, d.phaseLabel);
+  set('round-' + d.serial, d.round + '/' + d.totalRounds);
+  set('ok-' + d.serial, d.success);
+  set('fail-' + d.serial, d.failed);
+  set('act-' + d.serial, d.currentActivity);
+  const pct = d.totalRounds ? Math.round(d.round / d.totalRounds * 100) : 0;
+  const bar = document.getElementById('bar-' + d.serial);
+  if (bar) bar.style.width = pct + '%';
+  const isSwipe = d.taskKind === 'swipe';
+  const autoTag = d.swipeAuto ? ' <span class="tag run">自动</span>' : '';
+  const ss = document.getElementById('swipestate-' + d.serial);
+  if (ss) ss.innerHTML = isSwipe
+    ? `<span class="tag run">滑屏中 · ${dirLabel[d.swipeDir] || d.swipeDir} · 已滑 ${d.swipeCount} 次 · 下次 <b id="cd-${d.serial}"></b></span>${autoTag}`
+    : '<span class="mono">滑屏任务</span>';
+  cd[d.serial] = d.nextSwipeAt || 0;
+  ['up','down','left','right'].forEach(dir => {
+    const e = document.getElementById('dir-' + d.serial + '-' + dir);
+    if (e) e.classList.toggle('on', u.dir === dir);
+  });
+  const sel = document.getElementById('range-' + d.serial);
+  if (sel) sel.value = u.rangeKey === 'custom' ? 'custom' : u.rangeKey;
+  const custom = document.getElementById('custom-' + d.serial);
+  if (custom) custom.innerHTML = u.rangeKey === 'custom'
+    ? `<label>最小</label><input type="number" min="0.1" step="0.1" style="width:70px" value="${u.min}" oninput="ui['${d.serial}'].min=parseFloat(this.value||'1')"/> <label>最大(秒)</label><input type="number" min="0.1" step="0.1" style="width:70px" value="${u.max}" oninput="ui['${d.serial}'].max=parseFloat(this.value||'3')"/>`
+    : '';
+  const st = document.getElementById('start-' + d.serial);
+  if (st) st.disabled = !d.online;
+  const sp = document.getElementById('stop-' + d.serial);
+  if (sp) sp.disabled = !isSwipe;
+  const tp = document.getElementById('tap-' + d.serial);
+  if (tp) tp.checked = !!u.tapMode;
+  // revive the live preview if it had errored out (e.g. device was offline)
+  if (d.online) {
+    const img = document.getElementById('img-' + d.serial);
+    if (img && img.style.display === 'none') { img.style.display = ''; img.src = '/stream/' + d.serial + '?t=' + Date.now(); }
+  }
+}
+
+async function refresh(){
+  if (isEditing()) return;            // don't yank focus while user types
+  const s = await api('/api/status');
+  const seen = {};
+  for (const d of (s.devices || [])) {
+    seen[d.serial] = true;
+    if (!document.getElementById('card-' + d.serial)) buildCard(d);
+    updateCard(d);
+  }
+  document.querySelectorAll('#cards .card').forEach(c => {
+    const id = c.id.replace('card-', '');
+    if (!seen[id]) c.remove();
+  });
+  document.getElementById('log').innerHTML = (s.events || []).map(e =>
+    `<div style="color:${e.error ? '#ff9aa9' : '#9fb3c8'}">${e.ts.slice(11, 19)} [${e.serial}] ${e.msg}</div>`).join('');
+}
+
+function selDir(serial, dir){ ui[serial].dir = dir; refresh(); }
+
+async function startSwipe(serial){
+  const u = ensureUi(serial);
+  const body = { serial, direction: u.dir, rangeKey: u.rangeKey,
+    custom: u.rangeKey==='custom', minMs: Math.round((u.min||1)*1000), maxMs: Math.round((u.max||3)*1000) };
+  const r = await api('/api/swipe/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  flash(r.ok ? '已启动滑屏: '+(dirLabel[u.dir]||'') : ('错误: '+(r.error||'')));
+  refresh();
+}
+async function stopSwipe(serial){
+  await api('/api/device/'+serial+'/stop', { method:'POST' });
+  flash('已发送停止指令: '+serial);
+  refresh();
+}
+
+// ---- legacy task script ----
+async function startTask() {
+  const serial = document.getElementById('serial').value.trim();
+  let script; try { script = JSON.parse(document.getElementById('script').value); }
+  catch (e) { document.getElementById('msg').textContent = 'JSON 解析失败'; return; }
+  const r = await api('/api/task', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ serial, script }) });
+  document.getElementById('msg').textContent = r.ok ? '已启动: ' + r.app : ('错误: ' + (r.error||''));
+}
+async function stopAll() {
+  const s = await api('/api/status');
+  for (const d of (s.devices||[])) await api('/api/device/' + d.serial + '/stop', { method:'POST' });
+  document.getElementById('msg').textContent = '已发送停止指令';
+}
+async function loadSample() {
+  try {
+    const r = await fetch('/api/task_sample');
+    document.getElementById('script').value = await r.text();
+  } catch { document.getElementById('msg').textContent = '示例加载失败(请手动粘贴 tasks/sample_app.json)'; }
+}
+
+// ---- integrated 投屏 interactions ----
+function onMirrorClick(serial, ev){
+  const u = ui[serial];
+  if (!u || !u.tapMode) return;
+  const img = document.getElementById('img-' + serial);
+  const r = img.getBoundingClientRect();
+  const nx = (ev.clientX - r.left) / r.width;
+  const ny = (ev.clientY - r.top) / r.height;
+  api('/api/device/' + serial + '/tap', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ nx, ny }) })
+    .then(() => flash('点击 ' + serial + ' @' + nx.toFixed(2) + ',' + ny.toFixed(2)));
+}
+async function openMirror(serial){
+  const r = await api('/api/device/' + serial + '/mirror', { method:'POST' });
+  flash(r.ok ? ('已打开桌面投屏(scrcpy): ' + serial) : '打开失败');
+}
+async function sendKey(serial, code){
+  const r = await api('/api/device/' + serial + '/key', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code }) });
+  flash((r.ok ? '已发送' : '失败') + ' key=' + code);
+}
+
+// ---- live countdown ticker (independent of 2s refresh) ----
+setInterval(()=>{
+  for (const k in cd){
+    const el = document.getElementById('cd-'+k);
+    if (!el) continue;
+    const rem = cd[k] - Date.now();
+    el.textContent = rem>0 ? (rem/1000).toFixed(1)+'s' : (cd[k]? '即将…' : '');
+  }
+}, 250);
+
+(async () => { await loadPresets(); await loadAuto(); await refresh(); setInterval(refresh, 2000); })();
+</script>
+</body>
+</html>

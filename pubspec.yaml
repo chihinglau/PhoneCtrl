@@ -1,0 +1,8 @@
+name: phonectrl
+description: PC 端投屏与手机自动化控制（ADB 驱动：打开 App / 滑屏 / 点击广告 / 领取奖励）。
+version: 0.1.0
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+# 零依赖：仅用 dart:io / dart:convert / dart:async，不引入第三方包（对齐参考项目 GamePouch PC 工具）。
+dependencies: {}
+dev_dependencies: {}

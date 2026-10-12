@@ -1,0 +1,25 @@
+{
+  "_notes": "番茄免费小说「看视频得金币」剧本。所有坐标为相对值(0.0~1.0)，需按真机校准；未安装 tesseract 时请依赖坐标/区域中心，OCR 关键词仅作可选增稳。校准方法：① 启动 server 后在 Web 控制台 http://127.0.0.1:8858/ 看实时画面；② 用 `adb shell wm size` 取分辨率，目测目标按钮在屏上的相对位置(x/w, y/h)填入；③ 先用单轮(rounds=1)试跑，观察 monitor 日志逐步校正 entryRegion / claimRegion / verifyRegion。",
+  "appName": "番茄免费小说-看视频得金币",
+  "package": "com.dragon.read",
+  "activity": "",
+  "loop": {
+    "rounds": 10,
+    "openApp": true,
+    "nav": [
+      { "tap": [0.5, 0.95], "delayMs": 1500 }
+    ],
+    "videoAd": {
+      "entryRegion": [0.55, 0.80, 0.42, 0.16],
+      "entryKeywords": ["看视频", "视频得金币", "看视频得"],
+      "waitClaimMs": 45000,
+      "claimRegion": [0.35, 0.55, 0.30, 0.18],
+      "claimKeywords": ["领取", "开心收下", "领取金币"],
+      "verifyRegion": [0.30, 0.08, 0.40, 0.16],
+      "successKeywords": ["领取成功", "已领取", "开心收下", "+", "金币", "成功"],
+      "timeoutMs": 12000
+    },
+    "backHome": true,
+    "intervalMs": 1500
+  }
+}

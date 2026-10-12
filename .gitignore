@@ -1,0 +1,32 @@
+# ---- 运行产物 / 缓存 ----
+__pycache__/
+*.pyc
+.tools/
+*.log
+*.tmp
+
+# ---- 运行时输出 ----
+server.out
+server.err
+reg.out
+reg.err
+after.png
+before.png
+$null
+
+# ---- Dart 生成目录 ----
+.dart_tool/
+
+# ---- 无关项目遗留文件（非 PhoneCtrl 内容） ----
+/server.py
+/requirements.txt
+
+# ---- 推送流程 skill 文档（避免泄露凭据使用方式） ----
+/docs/skill_github_repo_access.md
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
