@@ -5,6 +5,11 @@ __pycache__/
 *.log
 *.tmp
 
+# ---- PyInstaller 构建产物（部署用，不入库）----
+dist/
+build/
+*.spec
+
 # ---- 运行时输出 ----
 server.out
 server.err

@@ -6,7 +6,7 @@
 > 并提供 **PyQt5 Windows 桌面控制台**，把 scrcpy 原生投屏与设备控制整合进同一个窗口，
 > 支持**多设备同时投屏、画面按手机竖屏比例均匀分配**。
 
-`版本 v0.2.0` · 平台：Windows 10/11 + Android（adb 可达）· 语言：Dart 3 + Python 3.10 + PowerShell 5.1
+`版本 v0.3.0` · 平台：Windows 10/11 + Android（adb 可达）· 语言：Dart 3 + Python 3.10 + PowerShell 5.1
 
 设计文档见 [`docs/投屏控制方案设计.md`](docs/投屏控制方案设计.md)。
 
@@ -26,15 +26,33 @@
 
 ## 桌面控制台（推荐）
 
-把 scrcpy 原生渲染窗口直接嵌入 Qt 界面，一个窗口完成投屏 + 控制：
+把 scrcpy 原生渲染窗口直接嵌入 Qt 界面，一个窗口完成投屏 + 控制。
+
+### 方式一：一键启动（本机开发）
 
 ```powershell
 # 1) 安装唯一 Python 依赖（PyQt5）
 pip install PyQt5
 
-# 2) 启动（自动探测/拉起 Dart 后端，无需先手动跑 run_server.ps1）
+# 2) 双击 启动控制台.bat，或命令行：
+powershell -ExecutionPolicy Bypass -File launch_console.ps1
+# 也可在已注入环境（. .\scripts\use-env.ps1）的终端直接：
 python win_console\app.py
 ```
+
+### 方式二：打包为 exe 分发（目标机免装 Python / Dart）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build_console_exe.ps1
+```
+
+脚本会先 `dart compile exe` 把后端编译成 `.tools/phonectrl_server.exe`（目标机免装 Dart SDK），
+再用 PyInstaller 把桌面控制台 + `.tools`（scrcpy / android-sdk / 原生后端）打成
+`dist/PhoneCtrlConsole/` 文件夹。**把该文件夹整体拷贝到目标 Windows 电脑，双击
+`PhoneCtrlConsole.exe` 即可运行**，无需安装 Python / PyQt5 / Dart SDK。
+
+> 排错：若控制台提示「无设备 / 后端启动失败」，多为 PowerShell dot-source 时 `$PSScriptRoot`
+> 错位（已修复）；详见 [`docs/投屏控制方案设计.md`](docs/投屏控制方案设计.md) 第 11 章。
 
 功能：
 
@@ -111,6 +129,7 @@ PhoneCtrl/
 
 | 版本 | 说明 |
 |------|------|
+| v0.3.0 | 修复 dot-source `$PSScriptRoot` 错位导致的「无设备/后端启动失败」；后端自动拉起预算提至 90s 并回显日志；新增独立窗口模式 + scrcpy 自动重连；支持打包为可分发 exe（`build_console_exe.ps1` / 启动控制台.bat / launch_console.ps1） |
 | v0.2.0 | 新增 PyQt5 桌面控制台：scrcpy 原生窗口嵌入、多设备按比例均匀分配、按键/一键解锁/自动滑屏/日志；新增 `/api/device/<serial>/unlock` 接口 |
 | v0.1.0 | 初版：PowerShell + Dart 零依赖服务 + ADB 封装 + Web 监控台 + 自动滑屏 |
 

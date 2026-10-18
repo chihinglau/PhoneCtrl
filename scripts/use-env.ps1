@@ -8,8 +8,12 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+  [string]$Root
 )
+# 注意：被 dot-source 时 $PSScriptRoot 指向“调用者”目录而非本文件目录，
+# 因此必须用 $MyInvocation.MyCommand.Path 取本脚本真实位置来推算根目录。
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $Root) { $Root = (Resolve-Path (Join-Path $ScriptDir '..')).Path }
 $ErrorActionPreference = 'Stop'
 $Tools = Join-Path $Root '.tools'
 
@@ -31,7 +35,9 @@ $dart = Join-Path $Tools 'flutter\bin\cache\dart-sdk\bin\dart.exe'
 if (Test-Path $dart) { $env:Path = "$(Split-Path $dart);$env:Path" }
 
 Write-Host "[env] ANDROID_HOME = $env:ANDROID_HOME" -ForegroundColor Cyan
-& adb version 2>$null | Select-Object -First 1
+if (Get-Command adb.exe -ErrorAction SilentlyContinue) {
+  & adb.exe version 2>$null | Select-Object -First 1
+}
 if (Get-Command scrcpy.exe -ErrorAction SilentlyContinue) {
   Write-Host '[env] scrcpy ready (live mirroring enabled).' -ForegroundColor Green
 } else {

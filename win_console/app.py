@@ -33,7 +33,42 @@ from PyQt5.QtWidgets import (
 )
 
 BASE = "http://127.0.0.1:8858"
-PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _app_base():
+    """打包后指向 exe 所在目录；开发态指向本文件所在目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_project():
+    """定位项目根（含 .tools / run_server.ps1 / pubspec.yaml 的目录）。
+
+    兼容三种运行形态：
+      * 开发态：win_console/app.py -> 父目录即项目根
+      * --onedir：exe 与 .tools、run_server.ps1 同目录
+      * --onefile：资源被解压到 sys._MEIPASS
+    """
+    base = _app_base()
+    meipass = getattr(sys, "_MEIPASS", None)
+    for cand in (meipass, base, os.path.join(base, "_internal")):
+        if cand and (os.path.isfile(os.path.join(cand, "run_server.ps1"))
+                     or os.path.isdir(os.path.join(cand, ".tools"))):
+            return cand
+    d = base
+    while True:
+        if (os.path.isfile(os.path.join(d, "run_server.ps1"))
+                or os.path.isfile(os.path.join(d, "pubspec.yaml"))):
+            return d
+        p = os.path.dirname(d)
+        if p == d:
+            break
+        d = p
+    return base
+
+
+PROJECT = _resolve_project()
 
 # ---------------------------------------------------------------------------
 # scrcpy / adb 路径解析（与 Dart 端 screen.dart 的候选逻辑一致）
@@ -158,6 +193,7 @@ class MainWindow(QMainWindow):
         self._backend_tries = 0
         # 多设备投屏状态：serial -> {proc, title, hwnd, host, tries}
         self.mirrors = {}
+        self._restart_count = {}
 
         self.log_signal.connect(self._append_log)
         self.devices_signal.connect(self._populate_devices)
@@ -228,6 +264,13 @@ class MainWindow(QMainWindow):
         mir_row2.addWidget(self.stop_mirror_btn)
         mir_row2.addWidget(self.stop_all_btn)
         right.addLayout(mir_row2)
+
+        # 投屏模式
+        mir_row3 = QHBoxLayout()
+        self.mirror_indep = QCheckBox("独立窗口(不嵌入)")
+        self.mirror_indep.setToolTip("勾选后 scrcpy 以独立窗口运行，规避嵌入窗口可能导致的断连")
+        mir_row3.addWidget(self.mirror_indep)
+        right.addLayout(mir_row3)
 
         # 按键
         key_box = QGroupBox("按键 / 导航")
@@ -314,20 +357,45 @@ class MainWindow(QMainWindow):
             self.start_mirror_btn.setEnabled(True)
             return
         if self._backend_tries == 0:
-            self.log_signal.emit("⏳ 未检测到后端，尝试启动 run_server.ps1 ...")
+            self.log_signal.emit("⏳ 未检测到后端，尝试启动后端 ...")
             try:
-                subprocess.Popen(
-                    ["powershell", "-ExecutionPolicy", "Bypass",
-                     "-File", os.path.join(PROJECT, "run_server.ps1")],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                env = self._scrcpy_env()
+                server_exe = os.path.join(PROJECT, ".tools", "phonectrl_server.exe")
+                if os.path.isfile(server_exe):
+                    # 已编译的原生后端：目标机无需 Dart SDK
+                    log_path = os.path.join(PROJECT, ".tools", "backend.log")
+                    lf = open(log_path, "w", encoding="utf-8", errors="replace")
+                    subprocess.Popen(
+                        [server_exe], env=env, stdout=lf, stderr=subprocess.STDOUT,
+                        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                    )
+                else:
+                    subprocess.Popen(
+                        ["powershell", "-ExecutionPolicy", "Bypass",
+                         "-File", os.path.join(PROJECT, "run_server.ps1")],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                    )
             except Exception as e:
                 self.log_signal.emit(f"⚠️ 启动后端失败: {e}")
         self._backend_tries += 1
-        if self._backend_tries < 12:
-            QTimer.singleShot(3000, self.ensure_backend)
+        # 冷启动 dart run 可能要 30~60s（首次 pub get + 编译），给足 90s 预算
+        if self._backend_tries < 45:
+            QTimer.singleShot(2000, self.ensure_backend)
         else:
-            self.log_signal.emit("❌ 后端启动失败，请手动运行 run_server.ps1")
+            tail = self._backend_log_tail()
+            self.log_signal.emit("❌ 后端启动失败，请手动运行 run_server.ps1"
+                                 + (f"\n—— 后端日志 ——\n{tail}" if tail else ""))
+
+    @staticmethod
+    def _backend_log_tail(n=20):
+        path = os.path.join(PROJECT, ".tools", "backend.log")
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                lines = [l.rstrip() for l in f if l.strip()]
+            return "\n".join(lines[-n:])
+        except Exception:
+            return ""
 
     # ---- 设备 ----
     def refresh_devices(self):
@@ -364,6 +432,16 @@ class MainWindow(QMainWindow):
         return self.dev_combo.currentData()
 
     # ---- 投屏嵌入（多设备） ----
+    def _scrcpy_env(self):
+        env = dict(os.environ)
+        home = android_home()
+        if home:
+            env["ANDROID_HOME"] = home
+            ptools = os.path.join(home, "platform-tools")
+            if ptools not in env.get("PATH", ""):
+                env["PATH"] = ptools + ";" + env.get("PATH", "")
+        return env
+
     def start_mirror(self, serial=None):
         if serial is None:
             serial = self._current_serial()
@@ -377,50 +455,56 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", "找不到 scrcpy.exe")
             return
         title = f"PhoneCtrl-{serial}"
-        # 每个设备一个格子：上方设备名 + 下方 scrcpy 宿主（纯 Qt 布局占位，非 native）
-        cell = QWidget(self.video_area)
-        cv = QVBoxLayout(cell)
-        cv.setContentsMargins(0, 0, 0, 0)
-        cv.setSpacing(2)
-        tag = QLabel(serial)
-        tag.setStyleSheet("color:#9aa4b2;font-size:11px;")
-        cv.addWidget(tag)
-        host = QFrame()
-        host.setFrameShape(QFrame.StyledPanel)
-        host.setStyleSheet("background:#10131a;")
-        cv.addWidget(host, stretch=1)
-        entry = {"proc": None, "title": title, "hwnd": None, "host": host,
-                 "cell": cell, "tries": 0}
-        self.mirrors[serial] = entry
-        self._relayout()
-        env = dict(os.environ)
-        home = android_home()
-        if home:
-            env["ANDROID_HOME"] = home
-            ptools = os.path.join(home, "platform-tools")
-            if ptools not in env.get("PATH", ""):
-                env["PATH"] = ptools + ";" + env.get("PATH", "")
-        self._apply_geometry()
-        cv.activate()  # 立即落地格子内部布局
-        _, _, init_w, init_h = self._embed_rect(entry)
-        init_w, init_h = max(init_w, 320), max(init_h, 480)  # 布局尚未算好时的兜底
-        # 捕获 scrcpy stderr，进程异常退出时可以看到原因
+        embed = not self.mirror_indep.isChecked()
+        if embed:
+            # 每个设备一个格子：上方设备名 + 下方 scrcpy 宿主（纯 Qt 布局占位，非 native）
+            cell = QWidget(self.video_area)
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(2)
+            tag = QLabel(serial)
+            tag.setStyleSheet("color:#9aa4b2;font-size:11px;")
+            cv.addWidget(tag)
+            host = QFrame()
+            host.setFrameShape(QFrame.StyledPanel)
+            host.setStyleSheet("background:#10131a;")
+            cv.addWidget(host, stretch=1)
+            entry = {"proc": None, "title": title, "hwnd": None, "host": host,
+                     "cell": cell, "tries": 0, "embed": True}
+            self.mirrors[serial] = entry
+            self._relayout()
+        else:
+            entry = {"proc": None, "title": title, "hwnd": None, "host": None,
+                     "cell": None, "tries": 0, "embed": False}
+            self.mirrors[serial] = entry
+        env = self._scrcpy_env()
         os.makedirs(os.path.join(PROJECT, ".tools"), exist_ok=True)
         err_path = os.path.join(PROJECT, ".tools", f"scrcpy_{serial}.log")
         entry["errfile"] = open(err_path, "w", encoding="utf-8", errors="replace")
         try:
+            if embed:
+                self._apply_geometry()
+                cv.activate()  # 立即落地格子内部布局
+                _, _, init_w, init_h = self._embed_rect(entry)
+                init_w, init_h = max(init_w, 320), max(init_h, 480)  # 兜底
+                args = [exe, "-s", serial, "--window-title", title,
+                        "--window-borderless", "--window-width", str(init_w),
+                        "--window-height", str(init_h), "--max-fps", "60", "--no-audio"]
+                tagtext = "嵌入中..."
+            else:
+                args = [exe, "-s", serial, "--window-title", title,
+                        "--max-fps", "60", "--no-audio"]
+                tagtext = "独立窗口"
             entry["proc"] = subprocess.Popen(
-                [exe, "-s", serial, "--window-title", title,
-                 "--window-borderless", "--window-width", str(init_w),
-                 "--window-height", str(init_h), "--max-fps", "60", "--no-audio"],
-                env=env, stdout=entry["errfile"], stderr=entry["errfile"],
+                args, env=env, stdout=entry["errfile"], stderr=entry["errfile"],
             )
         except Exception as e:
             entry["errfile"].close()
             self.log_signal.emit(f"⚠️ 启动 scrcpy 失败: {e}")
             return
-        self.log_signal.emit(f"▶ 启动 scrcpy: {serial} (嵌入中...)")
-        QTimer.singleShot(300, lambda: self._try_embed(serial))
+        self.log_signal.emit(f"▶ 启动 scrcpy: {serial} ({tagtext})")
+        if embed:
+            QTimer.singleShot(300, lambda: self._try_embed(serial))
 
     def start_mirror_all(self):
         serials = [self.dev_combo.itemData(i) for i in range(self.dev_combo.count())]
@@ -434,20 +518,21 @@ class MainWindow(QMainWindow):
 
     def _try_embed(self, serial):
         entry = self.mirrors.get(serial)
-        if not entry:
+        if not entry or not entry.get("embed", True):
             return
         hwnd = find_window(entry["title"])
         if hwnd:
             entry["hwnd"] = hwnd
             x, y, w, h = self._embed_rect(entry)
             embed_window(hwnd, int(self.video_area.winId()), x, y, w, h)
+            self._restart_count.pop(serial, None)  # 稳定嵌入，清零重连计数
             self.log_signal.emit(f"✅ scrcpy 已嵌入: {serial} (rect {x},{y} {w}x{h})")
             return
         entry["tries"] += 1
         if entry["tries"] < 30:
             QTimer.singleShot(300, lambda: self._try_embed(serial))
         else:
-            self.log_signal.emit(f"⚠️ 未能嵌入 {serial}，超时")
+            self.log_signal.emit(f"⚠️ 未能嵌入 {serial}，超时（可勾选『独立窗口』模式）")
 
     def _embed_rect(self, entry):
         """计算某设备 scrcpy 窗口应处的矩形（相对 video_area 的物理像素）。"""
@@ -484,6 +569,8 @@ class MainWindow(QMainWindow):
         ch = best_cw / aspect
         slot_w, slot_h = aw / best_cols, ah / best_rows
         for i, e in enumerate(self.mirrors.values()):
+            if e.get("cell") is None:
+                continue
             sx, sy = (i % best_cols) * slot_w, (i // best_cols) * slot_h
             x = sx + (slot_w - best_cw) / 2
             y = sy + (slot_h - ch) / 2
@@ -533,12 +620,16 @@ class MainWindow(QMainWindow):
             serial = self._current_serial()
         if serial is None:
             return
+        e = self.mirrors.get(serial)
+        if e is not None:
+            e["user_stop"] = True
         self._remove_mirror(serial)
         if not silent:
             self.log_signal.emit(f"■ 已停止投屏: {serial}")
 
     def stop_all(self):
         for serial in list(self.mirrors.keys()):
+            self.mirrors[serial]["user_stop"] = True
             self._remove_mirror(serial)
         self.log_signal.emit("■ 已停止全部投屏")
 
@@ -551,6 +642,16 @@ class MainWindow(QMainWindow):
             # 检测 scrcpy 是否已退出
             if e["proc"] is not None and e["proc"].poll() is not None:
                 tail = self._scrcpy_err_tail(serial)
+                # 非用户主动停止 → 自动重连（最多 3 次），应对瞬时断连
+                if not e.get("user_stop") and self._restart_count.get(serial, 0) < 3:
+                    self._restart_count[serial] = self._restart_count.get(serial, 0) + 1
+                    self.log_signal.emit(
+                        f"ℹ️ scrcpy 退出，自动重连 {serial} "
+                        f"({self._restart_count[serial]}/3)" + (f" ｜ {tail}" if tail else ""))
+                    self._remove_mirror(serial)
+                    QTimer.singleShot(2500, lambda s=serial: self.start_mirror(s))
+                    continue
+                self._restart_count.pop(serial, None)
                 self.log_signal.emit(f"ℹ️ scrcpy 已退出: {serial}" + (f" ｜ {tail}" if tail else ""))
                 self._remove_mirror(serial)
 
