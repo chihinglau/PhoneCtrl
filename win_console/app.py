@@ -70,6 +70,9 @@ def _resolve_project():
 
 PROJECT = _resolve_project()
 
+# Windows 下以「无窗口」方式启动子进程，避免后端/辅助控制台弹出黑框
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
 # ---------------------------------------------------------------------------
 # scrcpy / adb 路径解析（与 Dart 端 screen.dart 的候选逻辑一致）
 # ---------------------------------------------------------------------------
@@ -191,9 +194,12 @@ class MainWindow(QMainWindow):
 
         self.current_serial = None
         self._backend_tries = 0
-        # 多设备投屏状态：serial -> {proc, title, hwnd, host, tries}
+        # 多设备投屏状态：serial -> {proc, title, hwnd, host, tries, embed}
         self.mirrors = {}
         self._restart_count = {}
+        self._backend_proc = None    # 后端子进程（原生 exe / powershell）
+        self._backend_logf = None    # 后端日志文件句柄
+        self._closing = False        # 退出中标志，避免定时器重连拉起新进程
 
         self.log_signal.connect(self._append_log)
         self.devices_signal.connect(self._populate_devices)
@@ -208,6 +214,11 @@ class MainWindow(QMainWindow):
         self.dev_timer = QTimer(self)
         self.dev_timer.timeout.connect(self.refresh_devices)
         self.dev_timer.start(5000)
+
+        # 主程序退出时杀掉拉起的后端 + scrcpy 进程树并释放资源（关闭按钮 / 异常退出兜底）
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._cleanup)
 
         # 已嵌入窗口存活检测 + 自适应尺寸
         self.watch_timer = QTimer(self)
@@ -350,6 +361,8 @@ class MainWindow(QMainWindow):
 
     # ---- 后端 ----
     def ensure_backend(self):
+        if self._closing:
+            return
         if backend_ok():
             self.log_signal.emit("✅ 后端已连接 (8858)")
             self.refresh_devices()
@@ -361,26 +374,28 @@ class MainWindow(QMainWindow):
             try:
                 env = self._scrcpy_env()
                 server_exe = os.path.join(PROJECT, ".tools", "phonectrl_server.exe")
+                flags = CREATE_NO_WINDOW | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 if os.path.isfile(server_exe):
-                    # 已编译的原生后端：目标机无需 Dart SDK
+                    # 已编译的原生后端（console 子系统）：用 CREATE_NO_WINDOW 隐藏黑框
                     log_path = os.path.join(PROJECT, ".tools", "backend.log")
-                    lf = open(log_path, "w", encoding="utf-8", errors="replace")
-                    subprocess.Popen(
-                        [server_exe], env=env, stdout=lf, stderr=subprocess.STDOUT,
-                        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                    self._backend_logf = open(log_path, "w", encoding="utf-8", errors="replace")
+                    self._backend_proc = subprocess.Popen(
+                        [server_exe], env=env, stdout=self._backend_logf,
+                        stderr=subprocess.STDOUT, creationflags=flags,
                     )
                 else:
-                    subprocess.Popen(
-                        ["powershell", "-ExecutionPolicy", "Bypass",
+                    # 回退：run_server.ps1（隐藏 powershell / dart 窗口）
+                    self._backend_proc = subprocess.Popen(
+                        ["powershell", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
                          "-File", os.path.join(PROJECT, "run_server.ps1")],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                        creationflags=flags,
                     )
             except Exception as e:
                 self.log_signal.emit(f"⚠️ 启动后端失败: {e}")
         self._backend_tries += 1
         # 冷启动 dart run 可能要 30~60s（首次 pub get + 编译），给足 90s 预算
-        if self._backend_tries < 45:
+        if self._backend_tries < 45 and not self._closing:
             QTimer.singleShot(2000, self.ensure_backend)
         else:
             tail = self._backend_log_tail()
@@ -443,6 +458,8 @@ class MainWindow(QMainWindow):
         return env
 
     def start_mirror(self, serial=None):
+        if self._closing:
+            return
         if serial is None:
             serial = self._current_serial()
         if not serial:
@@ -497,6 +514,7 @@ class MainWindow(QMainWindow):
                 tagtext = "独立窗口"
             entry["proc"] = subprocess.Popen(
                 args, env=env, stdout=entry["errfile"], stderr=entry["errfile"],
+                creationflags=CREATE_NO_WINDOW,
             )
         except Exception as e:
             entry["errfile"].close()
@@ -589,10 +607,7 @@ class MainWindow(QMainWindow):
         if not e:
             return
         if e["proc"] is not None:
-            try:
-                e["proc"].terminate()
-            except Exception:
-                pass
+            self._kill_tree(e["proc"])
         f = e.get("errfile")
         if f is not None:
             try:
@@ -633,6 +648,51 @@ class MainWindow(QMainWindow):
             self._remove_mirror(serial)
         self.log_signal.emit("■ 已停止全部投屏")
 
+    # ---- 进程树清理（无窗口启动 + 退出释放）----
+    @staticmethod
+    def _kill_tree(proc):
+        """杀掉进程及其子进程树（scrcpy/adb、powershell/dart 等）。"""
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None and sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    def _kill_backend(self):
+        self._kill_tree(self._backend_proc)
+        self._backend_proc = None
+        if self._backend_logf is not None:
+            try:
+                self._backend_logf.close()
+            except Exception:
+                pass
+            self._backend_logf = None
+
+    def _cleanup(self):
+        """主程序退出：停止全部投屏、杀掉后端进程树、关闭日志、停定时器。"""
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self.dev_timer.stop()
+        except Exception:
+            pass
+        self.stop_all()
+        self._kill_backend()
+
+    def closeEvent(self, event):
+        self._cleanup()
+        super().closeEvent(event)
+
     def _watch_embed(self):
         for serial, e in list(self.mirrors.items()):
             # 自适应：按最新格子矩形重新摆位（自愈能力）
@@ -643,7 +703,8 @@ class MainWindow(QMainWindow):
             if e["proc"] is not None and e["proc"].poll() is not None:
                 tail = self._scrcpy_err_tail(serial)
                 # 非用户主动停止 → 自动重连（最多 3 次），应对瞬时断连
-                if not e.get("user_stop") and self._restart_count.get(serial, 0) < 3:
+                if (not e.get("user_stop") and self._restart_count.get(serial, 0) < 3
+                        and not self._closing):
                     self._restart_count[serial] = self._restart_count.get(serial, 0) + 1
                     self.log_signal.emit(
                         f"ℹ️ scrcpy 退出，自动重连 {serial} "
