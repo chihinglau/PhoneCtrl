@@ -10,9 +10,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'device.dart';
+import 'link_base.dart';
 import 'models.dart';
 
-class Adb {
+class Adb extends Link {
   /// exe resolution identical to GamePouch's Adb.exe.
   String get exe {
     final home = Platform.environment['ANDROID_HOME'];
@@ -22,6 +23,9 @@ class Adb {
     }
     return 'adb';
   }
+
+  @override
+  String get transport => 'adb';
 
   Future<ProcessResult> run(List<String> args) =>
       Process.run(exe, args, stdoutEncoding: systemEncoding);

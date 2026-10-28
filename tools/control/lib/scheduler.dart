@@ -9,10 +9,10 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'adb.dart';
 import 'automation.dart';
 import 'config.dart';
 import 'detector.dart';
+import 'link_base.dart';
 import 'models.dart';
 import 'monitor.dart';
 import 'png.dart';
@@ -28,8 +28,8 @@ abstract class Cancelable {
 }
 
 class Scheduler {
-  Scheduler(this.adb, this.screen, this.monitor, this.ocr);
-  final Adb adb;
+  Scheduler(this.link, this.screen, this.monitor, this.ocr);
+  final Link link;
   final ScreenManager screen;
   final Monitor monitor;
   final OcrProvider ocr;
@@ -72,7 +72,7 @@ class DeviceTask implements Cancelable {
   final TaskScript script;
   final Scheduler sched;
 
-  late final Automation _auto = Automation(sched.adb, sched.screen);
+  late final Automation _auto = Automation(sched.link, sched.screen);
   late final RewardVerifier _verifier = RewardVerifier(sched.ocr);
 
   bool _cancel = false;
@@ -120,7 +120,7 @@ class DeviceTask implements Cancelable {
     // 1) open app
     if (script.loop.openApp) {
       await _auto.openApp(serial, script.package, script.activity, _rp);
-      final ok = await sched.adb.waitApp(serial, script.package);
+      final ok = await sched.link.waitApp(serial, script.package);
       if (!ok) throw Exception('app not in foreground: ${script.package}');
       await _auto.waitStable(serial);
     }
@@ -162,7 +162,7 @@ class DeviceTask implements Cancelable {
         clicks++;
         await Future.delayed(const Duration(milliseconds: 600));
         // mis-tap guard: unexpected jump to browser/store
-        final act = await sched.adb.currentActivity(serial);
+        final act = await sched.link.currentActivity(serial);
         if (!act.contains(script.package) && !act.contains('com.android')) {
           sched.monitor.log(serial, 'mis-tap escaped app ($act); recovering');
           await _auto.keyEvent(serial, '4');
@@ -178,7 +178,7 @@ class DeviceTask implements Cancelable {
       final rw = script.loop.reward!;
       final before = await _frame();
       await _auto.tap(serial, rw.button, _rp);
-      final claimed = await sched.adb.waitFor(serial, () async {
+      final claimed = await sched.link.waitFor(serial, () async {
         final after = await _frame();
         if (after == null) return false;
         return await _verifier.verify(before!, after, rw.verifyRegion,
@@ -238,7 +238,7 @@ class DeviceTask implements Cancelable {
     await Future.delayed(const Duration(milliseconds: 800));
 
     // 2) 视频播放期间轮询「领取」是否出现（命中 claimKeywords 即认为可领）
-    final appeared = await sched.adb.waitFor(serial, () async {
+    final appeared = await sched.link.waitFor(serial, () async {
       if (v.claimKeywords.isNotEmpty) {
         if (await _regionHasKeywords(v.claimRegion, v.claimKeywords)) return true;
         if (await _regionHasKeywords(const Rect(0.0, 0.0, 1.0, 1.0), v.claimKeywords)) {
@@ -260,7 +260,7 @@ class DeviceTask implements Cancelable {
     await Future.delayed(const Duration(milliseconds: 500));
 
     // 4) 领取前/后校验
-    final ok = await sched.adb.waitFor(serial, () async {
+    final ok = await sched.link.waitFor(serial, () async {
       if (before == null) return false;
       final after = await _frame();
       if (after == null) return false;

@@ -19,11 +19,11 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'adb.dart';
+import 'link_base.dart';
 
 class ScreenManager {
-  ScreenManager(this.adb, {this.frameDir, this.streamWidth = 480, this.streamQuality = 5});
-  final Adb adb;
+  ScreenManager(this.link, {this.frameDir, this.streamWidth = 480, this.streamQuality = 5});
+  final Link link;
   final Directory? frameDir;
 
   /// Width (px) the live preview is scaled to; height follows aspect ratio.
@@ -47,6 +47,12 @@ class ScreenManager {
   // --------------------------------------------------------------------------
   Future<void> startMirror(String serial) async {
     if (_mirrors.containsKey(serial)) return;
+    // scrcpy is Android-only (adb). HarmonyOS devices mirror via the screenshot
+    // pipeline (snapshot_display) surfaced through /frame/ and /stream/ instead.
+    if (link.transportOf(serial) != 'adb') {
+      stderr.writeln('[screen] scrcpy mirror skipped for $serial (non-adb transport)');
+      return;
+    }
     final exe = _scrcpyExe();
     if (exe == null) {
       stderr.writeln('[screen] scrcpy not found; desktop mirror skipped for $serial');
@@ -83,7 +89,7 @@ class ScreenManager {
   Future<void> _captureLoop(String serial) async {
     while (_captureRunning[serial] == true) {
       try {
-        final png = await adb.screenshot(serial);
+        final png = await link.screenshot(serial);
         if (png != null && png.isNotEmpty) {
           _latest[serial] = png;
           _seq[serial] = (_seq[serial] ?? 0) + 1;
@@ -232,7 +238,7 @@ class ScreenManager {
   /// Capture a frame, optionally persist to <frameDir>/<serial>.png for the
   /// web console, and return the PNG bytes.
   Future<List<int>?> capture(String serial, {bool persist = true}) async {
-    final bytes = await adb.screenshot(serial);
+    final bytes = await link.screenshot(serial);
     if (bytes == null || bytes.isEmpty) return null;
     if (persist && frameDir != null) {
       final f = File('${frameDir!.path}/$serial.png');

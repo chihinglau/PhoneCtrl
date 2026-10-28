@@ -6,7 +6,7 @@
 > 并提供 **PyQt5 Windows 桌面控制台**，把 scrcpy 原生投屏与设备控制整合进同一个窗口，
 > 支持**多设备同时投屏、画面按手机竖屏比例均匀分配**。
 
-`版本 v0.3.0` · 平台：Windows 10/11 + Android（adb 可达）· 语言：Dart 3 + Python 3.10 + PowerShell 5.1
+`版本 v0.4.0` · 平台：Windows 10/11 + Android（adb 可达）/ 鸿蒙 OpenHarmony（hdc 可达）· 语言：Dart 3 + Python 3.10 + PowerShell 5.1
 
 设计文档见 [`docs/投屏控制方案设计.md`](docs/投屏控制方案设计.md)。
 
@@ -16,7 +16,7 @@
 |------|------|
 | 投屏架构 | scrcpy 实时投屏 + `screencap` 独立抓帧，二者解耦；桌面端 Win32 原生窗口嵌入（30~60fps 不卡） |
 | 多设备投屏 | 一键「全部投屏」，按手机竖屏比例自动均匀分配画面，互不遮挡，窗口缩放实时重排 |
-| ADB 封装 | `Adb` 类（exe 解析 / shell / run / devices / tap / swipe / startActivity），对齐参考项目范式 |
+| 双通道联机 | `Link` 传输抽象：`Adb`(adb, Android) 与 `Hdc`(hdc, 鸿蒙/OpenHarmony) 双通道发现与按 `serial` 路由（参考 GamePouch pura70：UI 输入走 `uitest`，启动走 `aa start`，截图走 `snapshot_display`） |
 | 桌面控制 | Home / 返回 / 任务 / 电源 / **一键解锁（唤醒+上滑+输 PIN）** / 自动滑屏开关 / 实时日志 |
 | 自动化 | openApp / tap / swipe / keyEvent / waitApp / waitStable，全部带重试与耗时统计 |
 | 广告识别 | 策略模式：区域坐标 / 模板匹配 / OCR 接口（可插拔），含误触防护 |

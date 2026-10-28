@@ -8,12 +8,9 @@
 import 'dart:async';
 import 'dart:math';
 
-import 'adb.dart';
 import 'automation.dart';
 import 'models.dart';
-import 'monitor.dart';
 import 'scheduler.dart';
-import 'screen.dart';
 
 /// Direction of a single swipe.
 const _dirLabels = {'up': '上', 'down': '下', 'left': '左', 'right': '右'};
@@ -68,7 +65,7 @@ class DeviceSwipeTask implements Cancelable {
 
   bool _cancel = false;
   Timer? _timer;
-  late final Automation _auto = Automation(sched.adb, sched.screen);
+  late final Automation _auto = Automation(sched.link, sched.screen);
 
   @override
   String get kind => 'swipe';

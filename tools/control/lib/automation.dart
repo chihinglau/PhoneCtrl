@@ -7,19 +7,19 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'adb.dart';
+import 'link_base.dart';
 import 'models.dart';
 import 'screen.dart';
 
 class Automation {
-  Automation(this.adb, this.screen);
-  final Adb adb;
+  Automation(this.link, this.screen);
+  final Link link;
   final ScreenManager screen;
 
   final Map<String, (int, int)> _resCache = {};
 
   Future<(int, int)> _res(String serial) async {
-    _resCache[serial] ??= await adb.resolution(serial);
+    _resCache[serial] ??= await link.resolution(serial);
     return _resCache[serial]!;
   }
 
@@ -43,23 +43,23 @@ class Automation {
 
   Future<OpResult> openApp(String serial, String pkg, [String? activity,
       RetryPolicy rp = const RetryPolicy()]) {
-    return _withRetry(serial, () => adb.openApp(serial, pkg, activity), rp, what: 'openApp($pkg)');
+    return _withRetry(serial, () => link.openApp(serial, pkg, activity), rp, what: 'openApp($pkg)');
   }
 
   Future<OpResult> tap(String serial, RPoint p, [RetryPolicy rp = const RetryPolicy()]) async {
     final (w, h) = await _res(serial);
-    return _withRetry(serial, () => adb.tap(serial, p, w, h), rp, what: 'tap($p)');
+    return _withRetry(serial, () => link.tap(serial, p, w, h), rp, what: 'tap($p)');
   }
 
   Future<OpResult> swipe(String serial, RPoint a, RPoint b, int ms,
       [RetryPolicy rp = const RetryPolicy()]) async {
     final (w, h) = await _res(serial);
-    return _withRetry(serial, () => adb.swipe(serial, a, b, w, h, ms), rp, what: 'swipe');
+    return _withRetry(serial, () => link.swipe(serial, a, b, w, h, ms), rp, what: 'swipe');
   }
 
   Future<OpResult> keyEvent(String serial, String code,
       [RetryPolicy rp = const RetryPolicy()]) {
-    return _withRetry(serial, () => adb.keyEvent(serial, code), rp, what: 'key($code)');
+    return _withRetry(serial, () => link.keyEvent(serial, code), rp, what: 'key($code)');
   }
 
   /// Perform a burst of swipes (e.g. scroll a feed). Returns how many succeeded.
@@ -101,12 +101,12 @@ class Automation {
   /// unexpected page (e.g. mis-tapped a payment/store dialog).
   Future<void> recover(String serial, String pkg) async {
     stderr.writeln('[auto] recover: press BACK to escape unexpected page');
-    await adb.keyEvent(serial, '4'); // KEYCODE_BACK
+    await link.keyEvent(serial, '4'); // KEYCODE_BACK
     await Future.delayed(const Duration(milliseconds: 800));
-    final act = await adb.currentActivity(serial);
+    final act = await link.currentActivity(serial);
     if (!act.contains(pkg)) {
       stderr.writeln('[auto] recover: re-open app $pkg');
-      await adb.openApp(serial, pkg);
+      await link.openApp(serial, pkg);
       await waitStable(serial);
     }
   }

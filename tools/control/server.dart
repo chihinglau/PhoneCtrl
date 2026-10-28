@@ -9,10 +9,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'lib/adb.dart';
 import 'lib/config.dart';
 import 'lib/device.dart';
 import 'lib/detector.dart';
+import 'lib/link.dart';
 import 'lib/monitor.dart';
 import 'lib/scheduler.dart';
 import 'lib/screen.dart';
@@ -29,7 +29,9 @@ final swipeCfgFile = File('${rootDir.path}/.tools/phonectrl.swipe.json');
 final autoSwipeFile = File('${rootDir.path}/.tools/phonectrl.autoswipe.json');
 AutoSwipeConfig _autoSwipe = AutoSwipeConfig();
 
-final adb = Adb();
+// Routes every device operation to the right transport (adb for Android,
+// hdc for HarmonyOS/OpenHarmony) discovered per serial.
+final adb = LinkRouter();
 final screen = ScreenManager(adb, frameDir: frameDir);
 final monitor = Monitor(stateFile: stateFile);
 final ocr = TesseractOcrProvider();
@@ -289,6 +291,26 @@ Future<void> _deviceUnlock(HttpRequest req, String serial) async {
   final j = jsonDecode(body) as Map<String, dynamic>;
   final pwd = (j['password'] ?? '').toString();
   final swipeUp = (j['swipeUp'] ?? true) as bool;
+
+  // HarmonyOS/OpenHarmony: no `input`/PIN-keycode path. Wake the screen and
+  // (optionally) swipe up to leave the lock screen. Per GamePouch's pura70 notes,
+  // the robust route is to remove the lock-screen password + keep awake; we just
+  // bring it to the lock screen here and let the operator unlock manually.
+  if (adb.transportOf(serial) == 'hdc') {
+    await adb.shellOr(serial, ['power-shell', 'wakeup']);
+    await Future.delayed(const Duration(milliseconds: 350));
+    if (swipeUp) {
+      final (w, h) = await adb.resolution(serial);
+      await adb.swipe(serial, RPoint(0.5, 0.82), RPoint(0.5, 0.16), w, h, 300);
+    }
+    await _json(req, {
+      'ok': true,
+      'detail': 'hdc: woke screen' + (swipeUp ? ' + swipe up' : '') +
+          ' (HarmonyOS PIN not auto-entered; remove lock password on device)',
+    });
+    return;
+  }
+
   final entered = <String>[];
 
   // 1) 唤醒（KEYCODE_WAKEUP=224，不会在亮屏时熄灭）

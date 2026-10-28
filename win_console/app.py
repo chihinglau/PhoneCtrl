@@ -26,6 +26,7 @@ import urllib.request
 import urllib.error
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint, QRect
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QCheckBox, QSpinBox, QGroupBox, QTextEdit, QMessageBox,
@@ -427,9 +428,14 @@ class MainWindow(QMainWindow):
     def _populate_devices(self, devs):
         prev = self.dev_combo.currentData()
         self.dev_combo.clear()
+        self._dev_transport = {}
         for d in devs:
-            label = f"{d.get('model','?')}  ({d.get('serial','?')})"
-            self.dev_combo.addItem(label, d.get("serial"))
+            serial = d.get("serial")
+            transport = d.get("transport", "adb")
+            self._dev_transport[serial] = transport
+            tag = "鸿蒙" if transport == "hdc" else ""
+            label = f"{d.get('model','?')}  ({serial})" + (f"  [{tag}]" if tag else "")
+            self.dev_combo.addItem(label, serial)
         if self.dev_combo.count() == 0:
             self.dev_combo.addItem("（无设备）", None)
             self.start_mirror_btn.setEnabled(False)
@@ -467,6 +473,11 @@ class MainWindow(QMainWindow):
             return
         if serial in self.mirrors:
             self.stop_mirror(serial, silent=True)
+        transport = self._dev_transport.get(serial, "adb")
+        if transport == "hdc":
+            # 鸿蒙/OpenHarmony 设备：scrcpy 不可用，改用后端 /frame 快照轮询预览
+            self._start_mirror_hdc(serial)
+            return
         exe = scrcpy_exe()
         if not exe:
             QMessageBox.critical(self, "错误", "找不到 scrcpy.exe")
@@ -533,6 +544,47 @@ class MainWindow(QMainWindow):
         # 错开启动，避免多台 scrcpy 同时抢占 adb/端口导致后者退出
         for i, s in enumerate(serials):
             QTimer.singleShot(i * 1500, lambda s=s: self.start_mirror(s))
+
+    def _start_mirror_hdc(self, serial):
+        """鸿蒙设备镜像：scrcpy 不支持 hdc，改用后端 /frame 快照轮询（约 2fps）。"""
+        title = f"PhoneCtrl-{serial}"
+        cell = QWidget(self.video_area)
+        cv = QVBoxLayout(cell)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(2)
+        tag = QLabel(f"{serial}  ·  鸿蒙(hdc 快照)")
+        tag.setStyleSheet("color:#9aa4b2;font-size:11px;")
+        cv.addWidget(tag)
+        label = QLabel("鸿蒙投屏（快照轮询，约 2fps）")
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("background:#10131a;color:#6b7280;")
+        label.setScaledContents(True)
+        cv.addWidget(label, stretch=1)
+        entry = {
+            "proc": None, "title": title, "hwnd": None, "host": None,
+            "cell": cell, "tries": 0, "embed": False, "transport": "hdc",
+            "label": label,
+        }
+        self.mirrors[serial] = entry
+        self._relayout()
+        self.log_signal.emit(f"▶ 启动鸿蒙快照预览: {serial}")
+        timer = QTimer(self)
+        timer.timeout.connect(lambda: self._poll_hdc_frame(serial))
+        timer.start(500)
+        entry["poll"] = timer
+
+    def _poll_hdc_frame(self, serial):
+        e = self.mirrors.get(serial)
+        if not e or self._closing or e.get("transport") != "hdc":
+            return
+        try:
+            data = urllib.request.urlopen(BASE + f"/frame/{serial}", timeout=2).read()
+            if data:
+                img = QImage.fromData(data)
+                if not img.isNull():
+                    e["label"].setPixmap(QPixmap.fromImage(img))
+        except Exception:
+            pass
 
     def _try_embed(self, serial):
         entry = self.mirrors.get(serial)
@@ -606,6 +658,12 @@ class MainWindow(QMainWindow):
         e = self.mirrors.pop(serial, None)
         if not e:
             return
+        poll = e.get("poll")
+        if poll is not None:
+            try:
+                poll.stop()
+            except Exception:
+                pass
         if e["proc"] is not None:
             self._kill_tree(e["proc"])
         f = e.get("errfile")
