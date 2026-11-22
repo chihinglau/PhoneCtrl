@@ -34,13 +34,14 @@ if (Test-Path $scr) { $env:Path = "$(Join-Path $Tools 'scrcpy');$env:Path" }
 # 参考 GamePouch：hdc 随 OHOS SDK 的 toolchains 目录发布，本项目不内置，需本机已装。
 $ohosRoots = @($env:OHOS_SDK_HOME, $env:DEVECO_SDK_HOME, 'D:\HuaWei\Sdk', 'C:\Program Files\Huawei\Sdk')
 $ohosVers = @('26.0.0', '12', 'OpenHarmony')
-foreach ($root in $ohosRoots) {
-  if (-not $root -or -not (Test-Path $root)) { continue }
+# 注意：变量名不可用 $root——PowerShell 变量不区分大小写，会覆盖 dot-source 调用者的 $Root。
+foreach ($ohosBase in $ohosRoots) {
+  if (-not $ohosBase -or -not (Test-Path $ohosBase)) { continue }
   foreach ($v in $ohosVers) {
-    $tc = Join-Path $root (Join-Path $v 'toolchains')
+    $tc = Join-Path $ohosBase (Join-Path $v 'toolchains')
     $hdcExe = Join-Path $tc 'hdc.exe'
     if (Test-Path $hdcExe) {
-      if (-not $env:OHOS_SDK_HOME) { $env:OHOS_SDK_HOME = $root }
+      if (-not $env:OHOS_SDK_HOME) { $env:OHOS_SDK_HOME = $ohosBase }
       $env:Path = "$tc;$env:Path"
       break
     }

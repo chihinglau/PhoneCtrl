@@ -7,11 +7,12 @@
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
-$Root = Resolve-Path (Join-Path $PSScriptRoot '.')
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '.')).Path
 $useEnv = Join-Path $Root 'scripts\use-env.ps1'
 if (Test-Path $useEnv) { . $useEnv -Root $Root | Out-Null }
 
-Set-Location $Root
+# dot-source 的脚本可能污染同名变量，这里用 $PSScriptRoot 重新定位，确保 cd 到项目根
+Set-Location $PSScriptRoot
 
 # 简易 Python 可用性自检
 if (-not (Get-Command python.exe -ErrorAction SilentlyContinue)) {

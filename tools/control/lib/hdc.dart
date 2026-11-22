@@ -167,9 +167,11 @@ class Hdc extends Link {
     final sw = Stopwatch()..start();
     final (x1, y1) = a.toPixels(w, h);
     final (x2, y2) = b.toPixels(w, h);
+    // uitest swipe 第5参是 velocity(200~40000)，不是时长 ms；用 ms 反推速度
+    final velocity = (10000 / ms.clamp(120, 40000)).round().clamp(200, 40000);
     try {
       await shell(serial,
-          ['uitest', 'uiInput', 'swipe', '$x1', '$y1', '$x2', '$y2', '$ms']);
+          ['uitest', 'uiInput', 'swipe', '$x1', '$y1', '$x2', '$y2', '$velocity']);
       return OpResult(ok: true, attempts: 1, costMs: sw.elapsedMilliseconds);
     } catch (e) {
       return OpResult(ok: false, attempts: 1, costMs: sw.elapsedMilliseconds, detail: e.toString());
@@ -179,8 +181,20 @@ class Hdc extends Link {
   @override
   Future<OpResult> keyEvent(String serial, String code) async {
     final sw = Stopwatch()..start();
+    // uitest keyEvent 只认 Back/Home/Power 字符串（或它自己的 keyID），
+    // 不认 Android keycode：3/4/26 静默无效。这里做兼容映射。
+    final mapped = switch (code) {
+      '3' || 'HOME' || 'Home' => 'Home',
+      '4' || 'BACK' || 'Back' => 'Back',
+      '26' || 'POWER' || 'Power' => 'Power',
+      _ => code,
+    };
+    if (mapped == '187' || mapped.toUpperCase() == 'RECENT') {
+      return OpResult(ok: false, attempts: 0, costMs: 0,
+          detail: 'HarmonyOS has no APP_SWITCH/Recent keyEvent; use bottom swipe gesture');
+    }
     try {
-      await shell(serial, ['uitest', 'uiInput', 'keyEvent', code]);
+      await shell(serial, ['uitest', 'uiInput', 'keyEvent', mapped]);
       return OpResult(ok: true, attempts: 1, costMs: sw.elapsedMilliseconds);
     } catch (e) {
       return OpResult(ok: false, attempts: 1, costMs: sw.elapsedMilliseconds, detail: e.toString());

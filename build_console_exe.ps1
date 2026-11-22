@@ -17,15 +17,36 @@ if (Test-Path $serverExe) {
     dart compile exe tools/control/server.dart -o $serverExe
 }
 
-# 2) PyInstaller 打包控制台（--onedir：exe 与 .tools 同目录，开箱即用）
-#    --add-data 的源;目标 分隔符是 ';'，在 PowerShell 里必须用双引号包住该参数，
-#    否则 ';' 会被当成语句分隔符。
-Write-Host ">> PyInstaller 打包桌面控制台 ..." -ForegroundColor Cyan
-pyinstaller --noconfirm --clean --noconsole --onedir --name PhoneCtrlConsole `
-    --add-data ".tools;.tools" `
-    --add-data "run_server.ps1;." `
-    --add-data "scripts;scripts" `
-    win_console/app.py
+# 2) 打包前临时移出华为版权组件（hosScrcpy jar），避免随产品分发。
+#    --add-data ".tools;.tools" 会把整个 .tools 打进去，必须先把第三方版权资源移走。
+$hosResource = Join-Path $root ".tools\.downloads\star-cast"
+$hosStash = Join-Path $env:TEMP "phonectrl_hos_stash"
+$hosMoved = $false
+if (Test-Path $hosResource) {
+    Write-Host ">> 临时移出华为投屏组件（不随产品分发）..." -ForegroundColor Yellow
+    if (Test-Path $hosStash) { Remove-Item $hosStash -Recurse -Force }
+    Move-Item $hosResource $hosStash -Force
+    $hosMoved = $true
+}
+try {
+    # 3) PyInstaller 打包控制台（--onedir：exe 与 .tools 同目录，开箱即用）
+    #    --add-data 的源;目标 分隔符是 ';'，在 PowerShell 里必须用双引号包住该参数，
+    #    否则 ';' 会被当成语句分隔符。
+    Write-Host ">> PyInstaller 打包桌面控制台 ..." -ForegroundColor Cyan
+    pyinstaller --noconfirm --clean --noconsole --onedir --name PhoneCtrlConsole `
+        --add-data ".tools;.tools" `
+        --add-data "run_server.ps1;." `
+        --add-data "scripts;scripts" `
+        win_console/app.py
+} finally {
+    # 4) 恢复华为投屏组件到开发机（本机自建投屏仍可用）
+    if ($hosMoved -and (Test-Path $hosStash)) {
+        $parent = Split-Path $hosResource -Parent
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        Move-Item $hosStash $hosResource -Force
+        Write-Host ">> 已恢复本机华为投屏组件" -ForegroundColor Green
+    }
+}
 
 Write-Host ">> 完成。部署目录: $root\dist\PhoneCtrlConsole" -ForegroundColor Green
 Write-Host "   将该文件夹整体拷贝到其它 Windows 电脑，双击 PhoneCtrlConsole.exe 即可。" -ForegroundColor Green

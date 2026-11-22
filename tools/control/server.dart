@@ -271,8 +271,10 @@ Future<void> _deviceTap(HttpRequest req, String serial) async {
   final (w, h) = await adb.resolution(serial);
   final px = (nx * w).round();
   final py = (ny * h).round();
-  final r = await adb.shellOr(serial, ['input', 'tap', '$px', '$py']);
-  await _json(req, {'ok': true, 'px': px, 'py': py, 'detail': r});
+  // 走路由感知的 tap：鸿蒙设备自动用 Hdc.tap -> uitest uiInput click，
+  // 不能写死 adb input tap（HarmonyOS 没有 input 命令）。
+  final r = await adb.tap(serial, RPoint(nx.toDouble(), ny.toDouble()), w, h);
+  await _json(req, {'ok': r.ok, 'px': px, 'py': py, 'detail': r.detail});
 }
 
 /// Inject a key event (code: 3=HOME, 4=BACK, ...).

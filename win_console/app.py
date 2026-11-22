@@ -25,15 +25,60 @@ import subprocess
 import urllib.request
 import urllib.error
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint, QRect
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QPoint, QRect
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QCheckBox, QSpinBox, QGroupBox, QTextEdit, QMessageBox,
-    QGridLayout, QLineEdit,
+    QGridLayout, QLineEdit, QToolButton, QSizePolicy,
 )
 
 BASE = "http://127.0.0.1:8858"
+
+
+class HosFrameBridge(QObject):
+    """鸿蒙自建投屏：解码线程的 BGR 帧 -> Qt 主线程信号桥。"""
+    frame_ready = pyqtSignal(object)   # numpy BGR ndarray
+    status = pyqtSignal(str)
+
+
+class MirrorInputLabel(QLabel):
+    """投屏画面：单击 -> 设备 tap；拖拽 -> 设备 swipe。坐标归一化到 0..1。"""
+    tapped = pyqtSignal(float, float)
+    swiped = pyqtSignal(float, float, float, float, int)
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self._press = None
+        self._press_t = 0.0
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._press = ev.pos()
+            self._press_t = time.time()
+        super().mousePressEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self._press is not None:
+            dx = ev.pos().x() - self._press.x()
+            dy = ev.pos().y() - self._press.y()
+            w, h = max(1, self.width()), max(1, self.height())
+            nx1, ny1 = self._press.x() / w, self._press.y() / h
+            nx2, ny2 = ev.pos().x() / w, ev.pos().y() / h
+            if (dx * dx + dy * dy) ** 0.5 > 18:
+                ms = max(120, min(800, int((time.time() - self._press_t) * 1000)))
+                self.swiped.emit(nx1, ny1, nx2, ny2, ms)
+            else:
+                self.tapped.emit(nx2, ny2)
+            self._press = None
+        super().mouseReleaseEvent(ev)
+
+
+def _hdc_path():
+    p = os.environ.get("HDC_EXE")
+    if p and os.path.isfile(p):
+        return p
+    return r"D:\HuaWei\Sdk\26.0.0\toolchains\hdc.exe"
 
 
 def _app_base():
@@ -100,6 +145,30 @@ def scrcpy_exe():
     candidates.append("scrcpy.exe")
     for c in candidates:
         if os.path.exists(c):
+            return os.path.abspath(c)
+    return None
+
+
+def hnscrcpy_exe():
+    """外置鸿蒙投屏工具 hnscrcpy（GUI，独立窗口）。不打包进产品，仅本机调试用。
+
+    候选顺序：环境变量 HNSCRCPY_EXE -> 项目 .tools/hnscrcpy -> 常见安装目录。
+    hnscrcpy 内置 hosScrcpy.jar + JRE + hdc，走 hdc fport 推 H.264（30~60fps）。
+    版权：hosScrcpy.jar/hdc 归华为，仅供个人学习研究，勿随产品分发。
+    """
+    candidates = []
+    env = os.environ.get("HNSCRCPY_EXE")
+    if env:
+        candidates.append(env)
+    candidates += [
+        os.path.join(PROJECT, ".tools", "hnscrcpy", "hnscrcpy.exe"),
+        os.path.join(PROJECT, ".tools", "hnscrcpy", "app", "hnscrcpy.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "hnscrcpy", "hnscrcpy.exe"),
+        r"C:\Program Files\hnscrcpy\hnscrcpy.exe",
+        r"C:\Program Files (x86)\hnscrcpy\hnscrcpy.exe",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
             return os.path.abspath(c)
     return None
 
@@ -181,6 +250,63 @@ def backend_ok():
 
 
 # ---------------------------------------------------------------------------
+# 可折叠分组框：点击标题栏箭头展开/收起，收起时只占一行高度
+# ---------------------------------------------------------------------------
+class CollapsibleBox(QWidget):
+    def __init__(self, title="", parent=None, expanded=False):
+        super().__init__(parent)
+        self.toggle = QToolButton()
+        self.toggle.setStyleSheet(
+            "QToolButton{border:0;background:transparent;font-weight:bold;"
+            "font-size:12px;color:#374151;padding:4px 2px;text-align:left;}"
+            "QToolButton:hover{color:#2563eb;}"
+        )
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.toggle.setText(f"  {title}")
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.clicked.connect(self._on_toggle)
+
+        self.content = QWidget()
+        self.content.setVisible(expanded)
+        self.content.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self.toggle)
+        lay.addWidget(self.content)
+
+    def _on_toggle(self, checked):
+        self.content.setVisible(checked)
+        self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+        # 通知父布局重新计算尺寸
+        self.updateGeometry()
+        if self.parentWidget():
+            self.parentWidget().updateGeometry()
+
+    def setExpanded(self, expanded):
+        self.toggle.setChecked(expanded)
+        self.content.setVisible(expanded)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def contentLayout(self):
+        """返回内容区垂直布局，用法与 QGroupBox 的 QVBoxLayout 一致。"""
+        layout = QVBoxLayout(self.content)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(6)
+        return layout
+
+    def contentGridLayout(self):
+        """返回内容区网格布局（用于按键等多列排布）。"""
+        layout = QGridLayout(self.content)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(6)
+        return layout
+
+
+# ---------------------------------------------------------------------------
 # 主窗口
 # ---------------------------------------------------------------------------
 class MainWindow(QMainWindow):
@@ -201,6 +327,14 @@ class MainWindow(QMainWindow):
         self._backend_proc = None    # 后端子进程（原生 exe / powershell）
         self._backend_logf = None    # 后端日志文件句柄
         self._closing = False        # 退出中标志，避免定时器重连拉起新进程
+        self.ks_proc = None          # 快手打卡子进程（运行中可停止）
+        self.ks_running = False
+        self.kv_proc = None          # 快手看视频攒金币子进程
+        self.kv_running = False
+        self.dy_proc = None          # 抖音看视频攒金币子进程
+        self.dy_running = False
+        self.kd_proc = None          # 快手打卡子任务子进程
+        self.kd_running = False
 
         self.log_signal.connect(self._append_log)
         self.devices_signal.connect(self._populate_devices)
@@ -284,25 +418,26 @@ class MainWindow(QMainWindow):
         mir_row3.addWidget(self.mirror_indep)
         right.addLayout(mir_row3)
 
-        # 按键
-        key_box = QGroupBox("按键 / 导航")
-        kg = QGridLayout(key_box)
+        # 按键 —— 可折叠
+        key_box = CollapsibleBox("按键 / 导航")
+        kg = key_box.contentGridLayout()
         self.btn_home = QPushButton("Home")
         self.btn_back = QPushButton("返回")
         self.btn_task = QPushButton("任务")
         self.btn_power = QPushButton("电源")
-        for b, code in ((self.btn_home, 3), (self.btn_back, 4),
-                        (self.btn_task, 187), (self.btn_power, 26)):
-            b.clicked.connect(lambda _checked, c=code: self.send_key(c))
+        # (按钮, Android keycode, 鸿蒙 uitest keyEvent 字符串；None=鸿蒙无等价键)
+        for b, code, hoskey in ((self.btn_home, 3, "Home"), (self.btn_back, 4, "Back"),
+                                (self.btn_task, 187, None), (self.btn_power, 26, "Power")):
+            b.clicked.connect(lambda _checked, c=code, hk=hoskey: self.send_key(c, hk))
         kg.addWidget(self.btn_home, 0, 0)
         kg.addWidget(self.btn_back, 0, 1)
         kg.addWidget(self.btn_task, 1, 0)
         kg.addWidget(self.btn_power, 1, 1)
         right.addWidget(key_box)
 
-        # 解锁
-        un_box = QGroupBox("一键解锁")
-        uv = QVBoxLayout(un_box)
+        # 解锁 —— 可折叠
+        un_box = CollapsibleBox("一键解锁")
+        uv = un_box.contentLayout()
         self.un_pwd = QLineEdit()
         self.un_pwd.setPlaceholderText("锁屏密码(PIN 数字)")
         self.un_pwd.setEchoMode(QLineEdit.Password)
@@ -318,9 +453,9 @@ class MainWindow(QMainWindow):
         uv.addLayout(un_row)
         right.addWidget(un_box)
 
-        # 自动滑屏
-        sw_box = QGroupBox("自动滑屏")
-        sv = QVBoxLayout(sw_box)
+        # 自动滑屏 —— 可折叠
+        sw_box = CollapsibleBox("自动滑屏")
+        sv = sw_box.contentLayout()
         self.as_enabled = QCheckBox("启用自动滑屏")
         self.as_enabled.stateChanged.connect(self._on_as_toggled)
         h1 = QHBoxLayout()
@@ -343,17 +478,118 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.as_apply)
         right.addWidget(sw_box)
 
-        right.addStretch(1)
+        # 快手极速版打卡（纯免费看广告，不支付金币）—— 可折叠
+        self.ks_box = CollapsibleBox("快手·连续打卡白拿新手机")
+        kv = self.ks_box.contentLayout()
+        ks_tip = QLabel("自动滚动+模板匹配定位「连续打卡白拿新手机」卡片，\n找不到就停止，绝不误点其它任务\n只走免费看广告，绝不消耗金币\n测试1个：看1条广告且不记幂等；开始打卡：最多20条+随机延时")
+        ks_tip.setStyleSheet("color:#6b7280;font-size:11px;")
+        ks_tip.setWordWrap(True)
+        kv.addWidget(ks_tip)
+        kr = QHBoxLayout()
+        self.ks_start = QPushButton("开始打卡")
+        self.ks_start.clicked.connect(lambda: self.start_ks_checkin(False))
+        self.ks_dry = QPushButton("测试1个")
+        self.ks_dry.clicked.connect(lambda: self.start_ks_checkin(True))
+        self.ks_stop = QPushButton("停止")
+        self.ks_stop.clicked.connect(self.stop_ks_checkin)
+        self.ks_stop.setEnabled(False)
+        kr.addWidget(self.ks_start, stretch=2)
+        kr.addWidget(self.ks_dry, stretch=1)
+        kr.addWidget(self.ks_stop, stretch=1)
+        kv.addLayout(kr)
+        right.addWidget(self.ks_box)
 
-        # 日志
-        log_box = QGroupBox("日志")
-        lv = QVBoxLayout(log_box)
+        # 快手极速版连续看视频攒金币（纯免费，不涉及支付）—— 可折叠
+        self.kv_box = CollapsibleBox("快手·连续看视频攒金币")
+        vv = self.kv_box.contentLayout()
+        kv_tip = QLabel("任务中心「连续看视频7天」卡片：看视频攒金币，\n红包待领取后自动「一键领取」\n刷视频用随机时长，回任务中心下拉刷新检测\n测试1轮：不写幂等；开始攒金币：最多10轮")
+        kv_tip.setStyleSheet("color:#6b7280;font-size:11px;")
+        kv_tip.setWordWrap(True)
+        vv.addWidget(kv_tip)
+        vr = QHBoxLayout()
+        self.kv_start = QPushButton("开始攒金币")
+        self.kv_start.clicked.connect(lambda: self.start_ks_video(False))
+        self.kv_dry = QPushButton("测试1轮")
+        self.kv_dry.clicked.connect(lambda: self.start_ks_video(True))
+        self.kv_stop = QPushButton("停止")
+        self.kv_stop.clicked.connect(self.stop_ks_video)
+        self.kv_stop.setEnabled(False)
+        vr.addWidget(self.kv_start, stretch=2)
+        vr.addWidget(self.kv_dry, stretch=1)
+        vr.addWidget(self.kv_stop, stretch=1)
+        vv.addLayout(vr)
+        right.addWidget(self.kv_box)
+
+        # 抖音极速版连续看视频赚金币（纯免费，不涉及支付）—— 可折叠
+        self.dy_box = CollapsibleBox("抖音·连续看视频赚金币")
+        dyv = self.dy_box.contentLayout()
+        dy_tip = QLabel("赚钱任务页「连续看视频30天赚30元」卡片：\n看视频攒金币，红包满后点红包内「领取」\n弹窗只点「开心收下」，绝不点「看广告再赚」\n测试1轮：不写幂等；开始攒金币：最多10轮")
+        dy_tip.setStyleSheet("color:#6b7280;font-size:11px;")
+        dy_tip.setWordWrap(True)
+        dyv.addWidget(dy_tip)
+        dr = QHBoxLayout()
+        self.dy_start = QPushButton("开始攒金币")
+        self.dy_start.clicked.connect(lambda: self.start_dy_video(False))
+        self.dy_dry = QPushButton("测试1轮")
+        self.dy_dry.clicked.connect(lambda: self.start_dy_video(True))
+        self.dy_stop = QPushButton("停止")
+        self.dy_stop.clicked.connect(self.stop_dy_video)
+        self.dy_stop.setEnabled(False)
+        dr.addWidget(self.dy_start, stretch=2)
+        dr.addWidget(self.dy_dry, stretch=1)
+        dr.addWidget(self.dy_stop, stretch=1)
+        dyv.addLayout(dr)
+        right.addWidget(self.dy_box)
+
+        # 快手 365 天打卡 · 6 子任务（纯免费，时长型回读 App 倒计时）—— 可折叠
+        self.kd_box = CollapsibleBox("快手·365天打卡 今日6子任务")
+        kdv = self.kd_box.contentLayout()
+        kd_tip = QLabel("入口/按钮/领奖全用 OCR 识别屏幕文字定位，布局变化也不点空。\n"
+                        "时长型回读倒计时 / 计数型回读 (N/20)(N/5)，一次运行做到完成。\n"
+                        "只走免费项，绝不点消耗金币/快速通。")
+        kd_tip.setStyleSheet("color:#6b7280;font-size:11px;")
+        kd_tip.setWordWrap(True)
+        kdv.addWidget(kd_tip)
+        kd_sel = QHBoxLayout()
+        kd_sel.addWidget(QLabel("子任务:"))
+        self.kd_task = QComboBox()
+        self.kd_task.addItems(["观看广告(0/20)", "每日签到", "观看精彩视频(80分)",
+                               "观看精彩短剧(30分)", "观看热门内容(0/5)", "下载并体验(跳过)"])
+        self.kd_task.setItemData(0, "ad")
+        self.kd_task.setItemData(1, "signin")
+        self.kd_task.setItemData(2, "video")
+        self.kd_task.setItemData(3, "drama")
+        self.kd_task.setItemData(4, "hot")
+        self.kd_task.setItemData(5, "app")
+        kd_sel.addWidget(self.kd_task, stretch=1)
+        kdv.addLayout(kd_sel)
+        kr = QHBoxLayout()
+        self.kd_start = QPushButton("开始")
+        self.kd_start.clicked.connect(lambda: self.start_kd_task(False))
+        self.kd_dry = QPushButton("测试1次")
+        self.kd_dry.clicked.connect(lambda: self.start_kd_task(True))
+        self.kd_stop = QPushButton("停止")
+        self.kd_stop.clicked.connect(self.stop_kd_task)
+        self.kd_stop.setEnabled(False)
+        kr.addWidget(self.kd_start, stretch=2)
+        kr.addWidget(self.kd_dry, stretch=1)
+        kr.addWidget(self.kd_stop, stretch=1)
+        kdv.addLayout(kr)
+        right.addWidget(self.kd_box)
+
+        # 日志 —— 可折叠（紧跟任务块，折叠其它分组时自动上移）
+        # 注意：此处不放 addStretch，否则日志会被顶到面板底部固定不动
+        log_box = CollapsibleBox("日志")
+        lv = log_box.contentLayout()
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(160)
         self.log.setStyleSheet("font-family:Consolas,Menlo,monospace;font-size:11px;")
         lv.addWidget(self.log)
         right.addWidget(log_box)
+
+        # 剩余空白落在日志下方，日志本体跟随上方分组折叠而移动
+        right.addStretch(1)
 
         hbox.addLayout(right, stretch=1)
 
@@ -472,10 +708,16 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先选择一台在线设备")
             return
         if serial in self.mirrors:
+            e = self.mirrors[serial]
+            # 鸿蒙自建投屏运行中：重复点「启动」直接忽略，避免反复重启 sidecar
+            # （每次重启要重新试 .so 5~15s，还会触发 ConnectionResetError）
+            if e.get("tool") == "native" and e.get("hos_client") and e["hos_client"].running:
+                self.log_signal.emit(f"ℹ️ {serial} 鸿蒙投屏已在运行，忽略重复启动")
+                return
             self.stop_mirror(serial, silent=True)
         transport = self._dev_transport.get(serial, "adb")
         if transport == "hdc":
-            # 鸿蒙/OpenHarmony 设备：scrcpy 不可用，改用后端 /frame 快照轮询预览
+            # 鸿蒙设备：优先自建 H.264 投屏，降级 hnscrcpy / 快照
             self._start_mirror_hdc(serial)
             return
         exe = scrcpy_exe()
@@ -545,8 +787,172 @@ class MainWindow(QMainWindow):
         for i, s in enumerate(serials):
             QTimer.singleShot(i * 1500, lambda s=s: self.start_mirror(s))
 
+    def _start_hos_native(self, serial):
+        """自建鸿蒙投屏：hosScrcpy sidecar -> H.264 -> PyAV 解码 -> 本窗口 QLabel。
+        仅开发调试用；hosScrcpy.jar 版权归华为，不随产品分发。"""
+        client_py = os.path.join(PROJECT, "tools", "hos_mirror", "client.py")
+        jar = os.path.join(PROJECT, ".tools", ".downloads", "star-cast", "resources",
+                           "hos", "hosScrcpy-1.0.18-beta.jar")
+        if not (os.path.isfile(client_py) and os.path.isfile(jar)):
+            return False
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("hos_mirror_client", client_py)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            self.log_signal.emit(f"ℹ️ 自建鸿蒙投屏组件不可用({e})，尝试其它方式")
+            return False
+
+        cell = QWidget(self.video_area)
+        cv = QVBoxLayout(cell)
+        cv.setContentsMargins(0, 0, 0, 0)
+        cv.setSpacing(2)
+        tag = QLabel(f"{serial}  ·  鸿蒙(H.264 实时)")
+        tag.setStyleSheet("color:#9aa4b2;font-size:11px;")
+        cv.addWidget(tag)
+        label = MirrorInputLabel("连接中…")
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("background:#10131a;color:#6b7280;")
+        label.setScaledContents(True)
+        label.setCursor(Qt.PointingHandCursor)
+        label.tapped.connect(lambda nx, ny, s=serial: self._on_hos_tap(s, nx, ny))
+        label.swiped.connect(lambda a, b, c, d, ms, s=serial: self._on_hos_swipe(s, a, b, c, d, ms))
+        cv.addWidget(label, stretch=1)
+        entry = {
+            "proc": None, "title": f"PhoneCtrl-HOS-{serial}", "hwnd": None,
+            "host": None, "cell": cell, "tries": 0, "embed": False,
+            "transport": "hdc", "tool": "native", "label": label,
+        }
+        bridge = HosFrameBridge()
+        entry["bridge"] = bridge
+        bridge.status.connect(lambda m, s=serial: self.log_signal.emit(f"[鸿蒙投屏] {m}"))
+        bridge.frame_ready.connect(lambda bgr, s=serial: self._on_hos_frame(s, bgr))
+        self.mirrors[serial] = entry
+        self._relayout()
+        client = mod.HosMirrorClient(
+            serial,
+            on_frame=lambda bgr, b=bridge: b.frame_ready.emit(bgr),
+            on_status=lambda m, b=bridge: b.status.emit(m),
+        )
+        entry["hos_client"] = client
+        if not client.start():
+            self.mirrors.pop(serial, None)
+            cell.hide(); cell.deleteLater(); self._relayout()
+            return False
+        self.log_signal.emit(f"▶ 启动鸿蒙实时投屏(自建H.264): {serial}")
+        return True
+
+    def _on_hos_frame(self, serial, bgr):
+        """主线程：把解码出的 BGR 帧画到对应镜像格子的 QLabel。"""
+        e = self.mirrors.get(serial)
+        if not e or self._closing or e.get("tool") != "native":
+            return
+        try:
+            h, w, ch = bgr.shape
+            if ch != 3:
+                return
+            e["frame_w"], e["frame_h"] = w, h
+            # PyQt5 不接受 numpy memoryview，须用 bytes；.copy() 保证连续内存
+            bgr = __import__("numpy").ascontiguousarray(bgr)
+            qimg = QImage(bgr.tobytes(), w, h, 3 * w, QImage.Format_BGR888)
+            if qimg.isNull():
+                self.log_signal.emit(f"[鸿蒙投屏] QImage 构造失败 {w}x{h}")
+                return
+            e["label"].setPixmap(QPixmap.fromImage(qimg))
+            if not e.get("_frame_logged"):
+                e["_frame_logged"] = True
+                self.log_signal.emit(f"[鸿蒙投屏] GUI 已收到首帧 {w}x{h} 并显示")
+        except Exception as ex:
+            self.log_signal.emit(f"[鸿蒙投屏] 显示帧异常: {type(ex).__name__}: {ex}")
+
+    def _hos_input(self, serial, args, desc):
+        """异步执行 hdc shell 输入命令，不阻塞 GUI。"""
+        e = self.mirrors.get(serial)
+        client = e.get("hos_client") if e else None
+        hdc = getattr(client, "hdc", None) or _hdc_path()
+        if not hdc:
+            self.log_signal.emit(f"[鸿蒙投屏] 无 hdc 路径，{desc}未执行")
+            return
+
+        def work():
+            try:
+                r = subprocess.run(
+                    [hdc, "-t", serial, "shell"] + args,
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                detail = (r.stdout or "").strip() or (r.stderr or "").strip()
+                ok = r.returncode == 0
+                self.log_signal.emit(
+                    f"[鸿蒙投屏] {desc} {'OK' if ok else '失败'}"
+                    + (f"：{detail[:160]}" if detail else "")
+                )
+            except Exception as ex:
+                self.log_signal.emit(f"[鸿蒙投屏] {desc}异常: {type(ex).__name__}: {ex}")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_hos_tap(self, serial, nx, ny):
+        e = self.mirrors.get(serial)
+        if not e or self._closing or e.get("tool") != "native":
+            return
+        w, h = e.get("frame_w", 1260), e.get("frame_h", 2844)
+        px, py = int(round(nx * w)), int(round(ny * h))
+        self._hos_input(serial, ["uitest", "uiInput", "click", str(px), str(py)],
+                        f"点击 ({px},{py})")
+
+    def _on_hos_swipe(self, serial, nx1, ny1, nx2, ny2, ms):
+        e = self.mirrors.get(serial)
+        if not e or self._closing or e.get("tool") != "native":
+            return
+        w, h = e.get("frame_w", 1260), e.get("frame_h", 2844)
+        x1, y1 = int(round(nx1 * w)), int(round(ny1 * h))
+        x2, y2 = int(round(nx2 * w)), int(round(ny2 * h))
+        # uitest swipe 第5参是 velocity(200~40000)，不是时长；太慢的 velocity 不会滚动
+        velocity = max(200, min(40000, int(10000 / max(120, ms))))
+        self._hos_input(serial,
+                        ["uitest", "uiInput", "swipe", str(x1), str(y1), str(x2), str(y2), str(velocity)],
+                        f"滑动 ({x1},{y1})->({x2},{y2}) v={velocity}")
+
     def _start_mirror_hdc(self, serial):
-        """鸿蒙设备镜像：scrcpy 不支持 hdc，改用后端 /frame 快照轮询（约 2fps）。"""
+        """鸿蒙设备镜像：优先自建 Python 接收端（hosScrcpy sidecar + H.264，嵌到本窗口）；
+        不可用则回退外置 hnscrcpy（独立窗口），再回退 /frame 快照（约 2fps）。"""
+        if self._start_hos_native(serial):
+            return
+        exe = hnscrcpy_exe()
+        if exe:
+            # hnscrcpy 是 JavaFX GUI，独立窗口运行（不能像 scrcpy 用 --window-title 嵌入）
+            title = f"PhoneCtrl-HOS-{serial}"
+            entry = {
+                "proc": None, "title": title, "hwnd": None, "host": None,
+                "cell": None, "tries": 0, "embed": False, "transport": "hdc",
+                "tool": "hnscrcpy",
+            }
+            self.mirrors[serial] = entry
+            os.makedirs(os.path.join(PROJECT, ".tools"), exist_ok=True)
+            log_path = os.path.join(PROJECT, ".tools", f"hnscrcpy_{serial}.log")
+            errfile = open(log_path, "w", encoding="utf-8", errors="replace")
+            entry["errfile"] = errfile
+            try:
+                # --serial 指定设备；--no-control 可只看不控（此处默认带控制）
+                args = [exe, "--serial", serial]
+                entry["proc"] = subprocess.Popen(
+                    args, stdout=errfile, stderr=errfile, creationflags=CREATE_NO_WINDOW,
+                )
+                self.log_signal.emit(f"▶ 启动 hnscrcpy 鸿蒙投屏: {serial}（独立窗口，H.264）")
+            except Exception as e:
+                errfile.close()
+                self.mirrors.pop(serial, None)
+                self.log_signal.emit(f"⚠️ 启动 hnscrcpy 失败: {e}，回退快照预览")
+                self._start_hdc_snapshot(serial)
+            return
+        # 未安装 hnscrcpy → 快照回退
+        self.log_signal.emit("ℹ️ 未找到 hnscrcpy（可设 HNSCRCPY_EXE 或装到 .tools/hnscrcpy），回退 2fps 快照")
+        self._start_hdc_snapshot(serial)
+
+    def _start_hdc_snapshot(self, serial):
+        """鸿蒙快照回退：后端 /frame 快照轮询（约 2fps）。"""
         title = f"PhoneCtrl-{serial}"
         cell = QWidget(self.video_area)
         cv = QVBoxLayout(cell)
@@ -563,7 +969,7 @@ class MainWindow(QMainWindow):
         entry = {
             "proc": None, "title": title, "hwnd": None, "host": None,
             "cell": cell, "tries": 0, "embed": False, "transport": "hdc",
-            "label": label,
+            "tool": "snapshot", "label": label,
         }
         self.mirrors[serial] = entry
         self._relayout()
@@ -645,6 +1051,8 @@ class MainWindow(QMainWindow):
             x = sx + (slot_w - best_cw) / 2
             y = sy + (slot_h - ch) / 2
             e["cell"].setGeometry(QRect(int(x), int(y), int(best_cw), int(ch)))
+            # 手动 setGeometry 的子控件不在 layout 管理下，父窗口 show() 不会级联显示
+            e["cell"].show()
         self._resize_all()
 
     def _resize_all(self):
@@ -662,6 +1070,12 @@ class MainWindow(QMainWindow):
         if poll is not None:
             try:
                 poll.stop()
+            except Exception:
+                pass
+        hc = e.get("hos_client")
+        if hc is not None:
+            try:
+                hc.stop()
             except Exception:
                 pass
         if e["proc"] is not None:
@@ -775,9 +1189,17 @@ class MainWindow(QMainWindow):
                 self._remove_mirror(serial)
 
     # ---- 按键 ----
-    def send_key(self, code):
+    def send_key(self, code, hoskey=None):
         serial = self._current_serial()
         if not serial:
+            return
+        if self._dev_transport.get(serial) == "hdc":
+            if hoskey is None:
+                self.log_signal.emit("ℹ️ 鸿蒙无『任务键』等价 keyEvent，请用底部上滑手势（GUI 拖拽）")
+                return
+            # 鸿蒙：uitest keyEvent 认 Back/Home/Power 字符串，不认 Android 数字 keycode
+            self._hos_input(serial, ["uitest", "uiInput", "keyEvent", hoskey],
+                            f"按键 {hoskey}")
             return
         threading.Thread(target=self._send_key, args=(serial, code), daemon=True).start()
 
@@ -856,6 +1278,271 @@ class MainWindow(QMainWindow):
             self.log_signal.emit(f"🔁 自动滑屏 -> {r}")
         except Exception as e:
             self.log_signal.emit(f"⚠️ 自动滑屏失败: {e}")
+
+    # ---- 快手极速版打卡（纯免费，运行 tools/ks_quick_checkin.py） ----
+    def start_ks_checkin(self, dry=False):
+        if self.ks_running:
+            self.log_signal.emit("ℹ️ 快手打卡已在运行中")
+            return
+        serial = self._current_serial()
+        if not serial:
+            QMessageBox.warning(self, "提示", "请先选择一台在线设备")
+            return
+        script = os.path.join(PROJECT, "tools", "ks_quick_checkin.py")
+        if not os.path.isfile(script):
+            QMessageBox.critical(self, "错误", f"找不到脚本:\n{script}")
+            return
+        cmd = [sys.executable, script, "--serial", serial]
+        if dry:
+            cmd += ["--rounds", "1", "--dry-run"]
+        else:
+            cmd += ["--rounds", "20"]
+        self.ks_running = True
+        self.ks_box.setExpanded(True)
+        self.ks_start.setEnabled(False)
+        self.ks_dry.setEnabled(False)
+        self.ks_stop.setEnabled(True)
+        self.log_signal.emit(f"▶ 启动快手打卡{'（测试1个）' if dry else ''}: {serial}")
+        threading.Thread(target=self._run_ks_checkin, args=(cmd,), daemon=True).start()
+
+    def _run_ks_checkin(self, cmd):
+        proc = None
+        try:
+            # 强制子进程用 UTF-8 输出，避免 Windows 默认 GBK 导致客户端日志中文乱码
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            proc = subprocess.Popen(
+                cmd, cwd=PROJECT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            self.ks_proc = proc
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_signal.emit(f"  {line}")
+            rc = proc.wait()
+            self.log_signal.emit(f"■ 快手打卡结束 (exit={rc})")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 快手打卡失败: {e}")
+        finally:
+            self.ks_proc = None
+            self.ks_running = False
+            # 用 Qt 信号安全地恢复按钮状态（跨线程不能直接改 QWidget）
+            QTimer.singleShot(0, self._ks_buttons_idle)
+
+    def _ks_buttons_idle(self):
+        self.ks_start.setEnabled(True)
+        self.ks_dry.setEnabled(True)
+        self.ks_stop.setEnabled(False)
+
+    def stop_ks_checkin(self):
+        proc = self.ks_proc
+        if proc is None or proc.poll() is not None:
+            self.log_signal.emit("ℹ️ 当前没有运行中的快手打卡")
+            return
+        try:
+            proc.terminate()
+            self.log_signal.emit("■ 已请求停止快手打卡")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 停止失败: {e}")
+
+    # ---- 快手极速版连续看视频攒金币（tools/ks_video_coins.py） ----
+    def start_ks_video(self, dry=False):
+        if self.kv_running:
+            self.log_signal.emit("ℹ️ 看视频攒金币已在运行中")
+            return
+        serial = self._current_serial()
+        if not serial:
+            QMessageBox.warning(self, "提示", "请先选择一台在线设备")
+            return
+        script = os.path.join(PROJECT, "tools", "ks_video_coins.py")
+        if not os.path.isfile(script):
+            QMessageBox.critical(self, "错误", f"找不到脚本:\n{script}")
+            return
+        cmd = [sys.executable, script, "--serial", serial]
+        if dry:
+            cmd += ["--rounds", "1", "--dry-run"]
+        else:
+            cmd += ["--rounds", "10"]
+        self.kv_running = True
+        self.kv_box.setExpanded(True)
+        self.kv_start.setEnabled(False)
+        self.kv_dry.setEnabled(False)
+        self.kv_stop.setEnabled(True)
+        self.log_signal.emit(f"▶ 启动看视频攒金币{'（测试1轮）' if dry else ''}: {serial}")
+        threading.Thread(target=self._run_ks_video, args=(cmd,), daemon=True).start()
+
+    def _run_ks_video(self, cmd):
+        proc = None
+        try:
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=env, text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+            )
+            self.kv_proc = proc
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_signal.emit(f"  {line}")
+            rc = proc.wait()
+            self.log_signal.emit(f"■ 看视频攒金币结束 (exit={rc})")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 看视频攒金币失败: {e}")
+        finally:
+            self.kv_proc = None
+            self.kv_running = False
+            QTimer.singleShot(0, self._kv_buttons_idle)
+
+    def _kv_buttons_idle(self):
+        self.kv_start.setEnabled(True)
+        self.kv_dry.setEnabled(True)
+        self.kv_stop.setEnabled(False)
+
+    def stop_ks_video(self):
+        proc = self.kv_proc
+        if proc is None or proc.poll() is not None:
+            self.log_signal.emit("ℹ️ 当前没有运行中的看视频攒金币")
+            return
+        try:
+            proc.terminate()
+            self.log_signal.emit("■ 已请求停止看视频攒金币")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 停止失败: {e}")
+
+    # ---- 抖音极速版连续看视频攒金币（tools/dy_video_coins.py） ----
+    def start_dy_video(self, dry=False):
+        if self.dy_running:
+            self.log_signal.emit("ℹ️ 抖音看视频攒金币已在运行中")
+            return
+        serial = self._current_serial()
+        if not serial:
+            QMessageBox.warning(self, "提示", "请先选择一台在线设备")
+            return
+        script = os.path.join(PROJECT, "tools", "dy_video_coins.py")
+        if not os.path.isfile(script):
+            QMessageBox.critical(self, "错误", f"找不到脚本:\n{script}")
+            return
+        cmd = [sys.executable, script, "--serial", serial]
+        if dry:
+            cmd += ["--rounds", "1", "--dry-run"]
+        else:
+            cmd += ["--rounds", "10"]
+        self.dy_running = True
+        self.dy_box.setExpanded(True)
+        self.dy_start.setEnabled(False)
+        self.dy_dry.setEnabled(False)
+        self.dy_stop.setEnabled(True)
+        self.log_signal.emit(f"▶ 启动抖音看视频攒金币{'（测试1轮）' if dry else ''}: {serial}")
+        threading.Thread(target=self._run_dy_video, args=(cmd,), daemon=True).start()
+
+    def _run_dy_video(self, cmd):
+        proc = None
+        try:
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=env, text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+            )
+            self.dy_proc = proc
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_signal.emit(f"  {line}")
+            rc = proc.wait()
+            self.log_signal.emit(f"■ 抖音看视频攒金币结束 (exit={rc})")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 抖音看视频攒金币失败: {e}")
+        finally:
+            self.dy_proc = None
+            self.dy_running = False
+            QTimer.singleShot(0, self._dy_buttons_idle)
+
+    def _dy_buttons_idle(self):
+        self.dy_start.setEnabled(True)
+        self.dy_dry.setEnabled(True)
+        self.dy_stop.setEnabled(False)
+
+    def stop_dy_video(self):
+        proc = self.dy_proc
+        if proc is None or proc.poll() is not None:
+            self.log_signal.emit("ℹ️ 当前没有运行中的抖音看视频攒金币")
+            return
+        try:
+            proc.terminate()
+            self.log_signal.emit("■ 已请求停止抖音看视频攒金币")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 停止失败: {e}")
+
+    # ---- 快手 365 天打卡 6 子任务（tools/ks_daily_tasks.py，纯免费） ----
+    def start_kd_task(self, dry=False):
+        if self.kd_running:
+            self.log_signal.emit("ℹ️ 打卡子任务已在运行中")
+            return
+        serial = self._current_serial()
+        if not serial:
+            QMessageBox.warning(self, "提示", "请先选择一台在线设备")
+            return
+        script = os.path.join(PROJECT, "tools", "ks_daily_tasks.py")
+        if not os.path.isfile(script):
+            QMessageBox.critical(self, "错误", f"找不到脚本:\n{script}")
+            return
+        task = self.kd_task.currentData() or "signin"
+        cmd = [sys.executable, script, "--task", task, "--serial", serial]
+        if dry:
+            cmd += ["--dry-run", "--force", "--watch", "12"]
+        self.kd_running = True
+        self.kd_box.setExpanded(True)
+        self.kd_start.setEnabled(False)
+        self.kd_dry.setEnabled(False)
+        self.kd_stop.setEnabled(True)
+        self.log_signal.emit(f"▶ 启动打卡子任务 {task}{'（测试1次，12秒，不写幂等）' if dry else ''}: {serial}")
+        threading.Thread(target=self._run_kd_task, args=(cmd,), daemon=True).start()
+
+    def _run_kd_task(self, cmd):
+        proc = None
+        try:
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=env, text=True, encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+            )
+            self.kd_proc = proc
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self.log_signal.emit(f"  {line}")
+            rc = proc.wait()
+            self.log_signal.emit(f"■ 打卡子任务结束 (exit={rc})")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 打卡子任务失败: {e}")
+        finally:
+            self.kd_proc = None
+            self.kd_running = False
+            QTimer.singleShot(0, self._kd_buttons_idle)
+
+    def _kd_buttons_idle(self):
+        self.kd_start.setEnabled(True)
+        self.kd_dry.setEnabled(True)
+        self.kd_stop.setEnabled(False)
+
+    def stop_kd_task(self):
+        proc = self.kd_proc
+        if proc is None or proc.poll() is not None:
+            self.log_signal.emit("ℹ️ 当前没有运行中的打卡子任务")
+            return
+        try:
+            proc.terminate()
+            self.log_signal.emit("■ 已请求停止打卡子任务")
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 停止失败: {e}")
 
     # ---- 日志 ----
     def _append_log(self, msg):
